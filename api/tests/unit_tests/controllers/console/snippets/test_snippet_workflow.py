@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from inspect import unwrap
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -51,9 +52,29 @@ def _workflow(**overrides) -> Workflow:
         marked_name="",
         marked_comment="",
     )
-    workflow.id = "workflow-1"
-    for key, value in overrides.items():
-        setattr(workflow, key, value)
+    workflow.id = overrides.pop("id", "workflow-1")
+    if "version" in overrides:
+        workflow.version = overrides.pop("version")
+    if "graph" in overrides:
+        workflow.graph = overrides.pop("graph")
+    if "features" in overrides:
+        workflow.features = overrides.pop("features")
+    if "marked_name" in overrides:
+        workflow.marked_name = overrides.pop("marked_name")
+    if "marked_comment" in overrides:
+        workflow.marked_comment = overrides.pop("marked_comment")
+    if "created_at" in overrides:
+        workflow.created_at = overrides.pop("created_at")
+    if "updated_at" in overrides:
+        workflow.updated_at = overrides.pop("updated_at")
+    if "environment_variables" in overrides:
+        workflow.environment_variables = overrides.pop("environment_variables")
+    if "conversation_variables" in overrides:
+        workflow.conversation_variables = overrides.pop("conversation_variables")
+    if "rag_pipeline_variables" in overrides:
+        workflow.rag_pipeline_variables = overrides.pop("rag_pipeline_variables")
+    if overrides:
+        raise AssertionError(f"unsupported workflow overrides: {sorted(overrides)}")
     return workflow
 
 
@@ -180,7 +201,7 @@ def _response_model_name(entry: object) -> str:
     assert isinstance(entry, tuple)
     assert len(entry) >= 2
     model = entry[1]
-    name = getattr(model, "name", None)
+    name = model.name
     assert isinstance(name, str)
     return name
 
@@ -216,7 +237,7 @@ def test_snippet_workflow_endpoints_keep_response_docs() -> None:
     ]
 
     for view, model_name in cases:
-        responses = getattr(view, "__apidoc__", {}).get("responses", {})
+        responses = view.__apidoc__["responses"]
         assert _response_model_name(responses["200"]) == model_name
 
 
