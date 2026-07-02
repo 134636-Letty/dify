@@ -182,6 +182,11 @@ export type WorkflowDraftVariableUpdatePayload = {
   value?: unknown
 }
 
+export type PublishWorkflowPayload = {
+  marked_comment?: string | null
+  marked_name?: string | null
+}
+
 export type PublishWorkflowResponse = {
   created_at: number
   result: string
@@ -786,7 +791,7 @@ export type GetSnippetsBySnippetIdWorkflowsPublishResponse
   = GetSnippetsBySnippetIdWorkflowsPublishResponses[keyof GetSnippetsBySnippetIdWorkflowsPublishResponses]
 
 export type PostSnippetsBySnippetIdWorkflowsPublishData = {
-  body?: never
+  body: PublishWorkflowPayload
   path: {
     snippet_id: string
   }

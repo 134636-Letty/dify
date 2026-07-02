@@ -6,7 +6,7 @@ from uuid import UUID
 
 from flask import Response, request
 from flask_restx import Resource
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import sessionmaker
 
 from controllers.common.errors import InvalidArgumentError, NotFoundError
@@ -57,14 +57,34 @@ class WorkflowDraftVariableUpdatePayload(BaseModel):
     value: Any = Field(default=None, description="Variable value")
 
 
+class WorkflowVariableItemPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    name: str | None = None
+    value_type: str | None = None
+    value: Any = None
+    description: str | None = None
+
+
+class ConversationVariableItemPayload(WorkflowVariableItemPayload):
+    pass
+
+
+class EnvironmentVariableItemPayload(WorkflowVariableItemPayload):
+    pass
+
+
 class ConversationVariableUpdatePayload(BaseModel):
-    conversation_variables: list[dict[str, Any]] = Field(
+    conversation_variables: list[ConversationVariableItemPayload] = Field(
         ..., description="Conversation variables for the draft workflow"
     )
 
 
 class EnvironmentVariableUpdatePayload(BaseModel):
-    environment_variables: list[dict[str, Any]] = Field(..., description="Environment variables for the draft workflow")
+    environment_variables: list[EnvironmentVariableItemPayload] = Field(
+        ..., description="Environment variables for the draft workflow"
+    )
 
 
 class WorkflowDraftVariableFullContentResponse(ResponseModel):
