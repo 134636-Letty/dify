@@ -629,7 +629,9 @@ class ConversationVariableCollectionApi(Resource):
 
         workflow_service = WorkflowService()
 
-        conversation_variables_list = payload.conversation_variables
+        conversation_variables_list = [
+            variable.model_dump(mode="json", exclude_unset=True) for variable in payload.conversation_variables
+        ]
         conversation_variables = [
             variable_factory.build_conversation_variable_from_mapping(obj) for obj in conversation_variables_list
         ]
@@ -728,7 +730,9 @@ class EnvironmentVariableCollectionApi(Resource):
 
         workflow_service = WorkflowService()
 
-        environment_variables_list = payload.environment_variables
+        environment_variables_list = [
+            variable.model_dump(mode="json", exclude_unset=True) for variable in payload.environment_variables
+        ]
         environment_variables = [
             variable_factory.build_environment_variable_from_mapping(obj) for obj in environment_variables_list
         ]
