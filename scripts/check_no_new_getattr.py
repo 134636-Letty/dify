@@ -86,16 +86,29 @@ def git_output(*args: str, allow_missing: bool = False) -> str:
     raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "git command failed")
 
 
+def resolve_comparison_base(args: argparse.Namespace) -> str:
+    merge_base = git_output("merge-base", args.merge_target, "HEAD", allow_missing=True).strip()
+    if merge_base:
+        return merge_base
+
+    # GitHub's pull_request merge checkout can be shallow enough that HEAD has no visible parents.
+    # The workflow fetches the target branch separately, so diffing that tree against HEAD still isolates PR changes.
+    if args.mode == "ci" and git_output("rev-parse", "--verify", args.merge_target, allow_missing=True).strip():
+        return args.merge_target
+
+    raise RuntimeError(f"unable to resolve merge base for {args.merge_target} and HEAD")
+
+
 def collect_diff_text(args: argparse.Namespace) -> str:
     if args.mode == "pre-commit":
         return git_output("diff", "--cached", "--unified=0", "--diff-filter=AM", "--no-ext-diff")
-    merge_base = git_output("merge-base", args.merge_target, "HEAD").strip()
+    comparison_base = resolve_comparison_base(args)
     return git_output(
         "diff",
         "--unified=0",
         "--diff-filter=AM",
         "--no-ext-diff",
-        f"{merge_base}..HEAD",
+        f"{comparison_base}..HEAD",
     )
 
 
@@ -146,9 +159,9 @@ def load_file_versions(path: str, args: argparse.Namespace) -> tuple[str, str]:
             git_output("show", f":{path}"),
         )
 
-    merge_base = git_output("merge-base", args.merge_target, "HEAD").strip()
+    comparison_base = resolve_comparison_base(args)
     return (
-        git_output("show", f"{merge_base}:{path}", allow_missing=True),
+        git_output("show", f"{comparison_base}:{path}", allow_missing=True),
         git_output("show", f"HEAD:{path}"),
     )
 
