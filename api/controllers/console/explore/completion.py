@@ -28,7 +28,6 @@ from core.errors.error import (
     ProviderTokenNotInitError,
     QuotaExceededError,
 )
-from extensions.ext_database import db
 from graphon.model_runtime.errors.invoke import InvokeError
 from libs import helper
 from libs.datetime_utils import naive_utc_now
@@ -86,6 +85,7 @@ register_response_schema_models(console_ns, GeneratedAppResponse, SimpleResultRe
 class CompletionApi(InstalledAppResource):
     @console_ns.expect(console_ns.models[CompletionMessageExplorePayload.__name__])
     @console_ns.response(200, "Success", console_ns.models[GeneratedAppResponse.__name__])
+    @with_session(write=True)
     @with_current_user
     @with_session
     def post(self, session: Session, current_user: Account, installed_app: InstalledApp):
@@ -102,7 +102,6 @@ class CompletionApi(InstalledAppResource):
         args["auto_generate_name"] = False
 
         installed_app.last_used_at = naive_utc_now()
-        db.session.commit()
 
         try:
             response = AppGenerateService.generate(
@@ -168,6 +167,7 @@ class CompletionStopApi(InstalledAppResource):
 class ChatApi(InstalledAppResource):
     @console_ns.expect(console_ns.models[ChatMessagePayload.__name__])
     @console_ns.response(200, "Success", console_ns.models[GeneratedAppResponse.__name__])
+    @with_session(write=True)
     @with_current_user
     @with_session
     def post(self, session: Session, current_user: Account, installed_app: InstalledApp):
@@ -184,7 +184,6 @@ class ChatApi(InstalledAppResource):
         args["auto_generate_name"] = False
 
         installed_app.last_used_at = naive_utc_now()
-        db.session.commit()
 
         try:
             response = AppGenerateService.generate(
