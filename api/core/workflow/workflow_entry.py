@@ -1,7 +1,7 @@
 import logging
 import time
 from collections.abc import Generator, Mapping, Sequence
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from configs import dify_config
 from context import capture_current_context
@@ -43,6 +43,7 @@ from graphon.filters import GraphEventFilterContext, ResponseStreamFilter, filte
 from graphon.graph import Graph
 from graphon.graph_engine import GraphEngine, GraphEngineConfig
 from graphon.graph_engine.command_channels import CommandChannel, InMemoryChannel
+from graphon.graph_engine.domain.node_execution import NodeExecution
 from graphon.graph_engine.layers import DebugLoggingLayer, ExecutionLimitsLayer
 from graphon.graph_events import GraphEngineEvent, GraphNodeEventBase, GraphRunFailedEvent
 from graphon.nodes import BuiltinNodeTypes
@@ -88,10 +89,12 @@ def _extract_failed_node_id(graph_engine: GraphEngine) -> str:
 
         node_executions = graph_execution.node_executions
         for _node_id, node_exec in node_executions.items():
-            # NodeExecutionProtocol doesn't declare `error`, but the concrete
-            # NodeExecution dataclass has it. Use getattr for safety.
-            if getattr(node_exec, "error", None) is not None:
-                return getattr(node_exec, "node_id", _node_id)
+            # NodeExecutionProtocol doesn't declare `error`/`node_id`, but
+            # the concrete NodeExecution entity has both.  cast() informs the
+            # type checker without changing runtime behaviour.
+            execution = cast(NodeExecution, node_exec)
+            if execution.error is not None:
+                return execution.node_id
     except (AttributeError, TypeError, KeyError):
         pass
 

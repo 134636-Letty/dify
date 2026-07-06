@@ -123,9 +123,10 @@ class StructuredJSONFormatter(logging.Formatter):
         return log_dict
 
     def _extract_identity(self, record: logging.LogRecord) -> IdentityDict | None:
-        tenant_id = getattr(record, "tenant_id", None)
-        user_id = getattr(record, "user_id", None)
-        user_type = getattr(record, "user_type", None)
+        record_attrs = vars(record)
+        tenant_id = record_attrs.get("tenant_id")
+        user_id = record_attrs.get("user_id")
+        user_type = record_attrs.get("user_type")
 
         if not any([tenant_id, user_id, user_type]):
             return None
@@ -141,9 +142,10 @@ class StructuredJSONFormatter(logging.Formatter):
 
     def _extract_log_context(self, record: logging.LogRecord) -> LogContextDict | None:
         """Extract workflow log context (app_id, workflow_id, node_id) from record."""
-        app_id = getattr(record, "app_id", "") or ""
-        workflow_id = getattr(record, "workflow_id", "") or ""
-        node_id = getattr(record, "node_id", "") or ""
+        record_attrs = vars(record)
+        app_id = record_attrs.get("app_id") or ""
+        workflow_id = record_attrs.get("workflow_id") or ""
+        node_id = record_attrs.get("node_id") or ""
 
         if not any([app_id, workflow_id, node_id]):
             return None
