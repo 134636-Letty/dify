@@ -81,7 +81,13 @@ def batch_clean_document_task(document_ids: list[str], dataset_id: str, doc_form
                     else:
                         index_processor = IndexProcessorFactory(doc_form).init_index_processor()
                         index_processor.clean(
-                            dataset, index_node_ids, with_keywords=True, delete_child_chunks=True, delete_summaries=True
+                            dataset,
+                            index_node_ids,
+                            with_keywords=True,
+                            delete_child_chunks=True,
+                            delete_summaries=True,
+                            segment_ids=segment_ids,
+                            session=session,
                         )
             except Exception:
                 logger.exception(

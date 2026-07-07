@@ -200,16 +200,15 @@ class TestParagraphIndexProcessor:
         session.scalars.return_value = scalars_result
 
         with (
-            patch("core.rag.index_processor.processor.paragraph_index_processor.db.session", session),
             patch(
                 "core.rag.index_processor.processor.paragraph_index_processor.SummaryIndexService.delete_summaries_for_segments"
             ) as mock_summary,
             patch("core.rag.index_processor.processor.paragraph_index_processor.Vector") as mock_vector_cls,
         ):
             vector = mock_vector_cls.return_value
-            processor.clean(dataset, ["node-1"], delete_summaries=True)
+            processor.clean(dataset, ["node-1"], delete_summaries=True, segment_ids=["seg-1"], session=session)
 
-        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=["seg-1"])
+        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=["seg-1"], session=session)
         vector.delete_by_ids.assert_called_once_with(["node-1"])
 
     def test_clean_economy_deletes_summaries_and_keywords(
@@ -225,7 +224,7 @@ class TestParagraphIndexProcessor:
         ):
             processor.clean(dataset, None, delete_summaries=True)
 
-        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=None)
+        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=None, session=None)
         mock_keyword_cls.return_value.delete.assert_called_once()
 
     def test_clean_deletes_keywords_by_ids(self, processor: ParagraphIndexProcessor, dataset: Mock) -> None:
@@ -534,17 +533,11 @@ class TestParagraphIndexProcessor:
         session = Mock()
         session.scalars.return_value = scalars_result
 
-        with (
-            patch(
-                "core.rag.index_processor.processor.paragraph_index_processor.build_from_mapping",
-                return_value=SimpleNamespace(id="file-1"),
-            ) as mock_builder,
-            caplog.at_level(logging.WARNING, logger="core.rag.index_processor.processor.paragraph_index_processor"),
-        ):
+        with caplog.at_level(logging.WARNING, logger="core.rag.index_processor.processor.paragraph_index_processor"):
             files = ParagraphIndexProcessor._extract_images_from_text("tenant-1", text, session)
 
         assert len(files) == 1
-        assert mock_builder.call_count == 1
+        assert files[0].id == image_upload.id
         assert not any(record.levelno == logging.WARNING for record in caplog.records)
 
     def test_extract_images_from_text_returns_empty_when_no_matches(self) -> None:
@@ -573,7 +566,7 @@ class TestParagraphIndexProcessor:
 
         with (
             patch(
-                "core.rag.index_processor.processor.paragraph_index_processor.build_from_mapping",
+                "core.rag.index_processor.processor.paragraph_index_processor.File",
                 side_effect=RuntimeError("build failed"),
             ),
             caplog.at_level(logging.WARNING, logger="core.rag.index_processor.processor.paragraph_index_processor"),

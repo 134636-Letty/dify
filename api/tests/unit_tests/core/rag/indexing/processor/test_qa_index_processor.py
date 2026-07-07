@@ -232,18 +232,14 @@ class TestQAIndexProcessor:
 
         with (
             patch(
-                "core.rag.index_processor.processor.qa_index_processor.session_factory.create_session",
-                return_value=session_context,
-            ),
-            patch(
                 "core.rag.index_processor.processor.qa_index_processor.SummaryIndexService.delete_summaries_for_segments"
             ) as mock_summary,
             patch("core.rag.index_processor.processor.qa_index_processor.Vector") as mock_vector_cls,
         ):
             vector = mock_vector_cls.return_value
-            processor.clean(dataset, ["node-1"], delete_summaries=True)
+            processor.clean(dataset, ["node-1"], delete_summaries=True, segment_ids=["seg-1"], session=mock_session)
 
-        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=["seg-1"])
+        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=["seg-1"], session=mock_session)
         vector.delete_by_ids.assert_called_once_with(["node-1"])
 
     def test_clean_handles_dataset_wide_cleanup(self, processor: QAIndexProcessor, dataset: Mock) -> None:
@@ -256,7 +252,7 @@ class TestQAIndexProcessor:
             vector = mock_vector_cls.return_value
             processor.clean(dataset, None, delete_summaries=True)
 
-        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=None)
+        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=None, session=None)
         vector.delete.assert_called_once()
 
     def test_index_adds_documents_and_vectors_for_high_quality(

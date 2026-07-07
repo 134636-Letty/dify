@@ -268,17 +268,20 @@ class TestParentChildIndexProcessor:
 
         with (
             patch(
-                "core.rag.index_processor.processor.parent_child_index_processor.session_factory.create_session",
-                return_value=session_ctx,
-            ),
-            patch(
                 "core.rag.index_processor.processor.parent_child_index_processor.SummaryIndexService.delete_summaries_for_segments"
             ) as mock_summary,
             patch("core.rag.index_processor.processor.parent_child_index_processor.Vector"),
         ):
-            processor.clean(dataset, ["node-1"], delete_summaries=True, precomputed_child_node_ids=[])
+            processor.clean(
+                dataset,
+                ["node-1"],
+                delete_summaries=True,
+                precomputed_child_node_ids=[],
+                segment_ids=["seg-1"],
+                session=session,
+            )
 
-        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=["seg-1"])
+        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=["seg-1"], session=session)
 
     def test_clean_deletes_all_summaries_when_node_ids_missing(
         self, processor: ParentChildIndexProcessor, dataset: Mock
@@ -291,7 +294,7 @@ class TestParentChildIndexProcessor:
         ):
             processor.clean(dataset, None, delete_summaries=True)
 
-        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=None)
+        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=None, session=None)
 
     def test_split_child_nodes_requires_subchunk_segmentation(self, processor: ParentChildIndexProcessor) -> None:
         rules = Rule(subchunk_segmentation=None)

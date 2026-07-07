@@ -85,23 +85,22 @@ def generate_summary_index_task(dataset_id: str, document_id: str, segment_ids: 
             # Determine if only parent chunks should be processed
             only_parent_chunks = dataset.chunk_structure == "parent_child_index"
 
-            # Generate summaries
-            summary_records = SummaryIndexService.generate_summaries_for_document(
-                dataset=dataset,
-                document=document,
-                summary_index_setting=summary_index_setting,
-                segment_ids=segment_ids,
-                only_parent_chunks=only_parent_chunks,
-            )
+        summary_records = SummaryIndexService.generate_summaries_for_document(
+            dataset=dataset,
+            document=document,
+            summary_index_setting=summary_index_setting,
+            segment_ids=segment_ids,
+            only_parent_chunks=only_parent_chunks,
+        )
 
-            end_at = time.perf_counter()
-            logger.info(
-                click.style(
-                    f"Summary index generation completed for document {document_id}: "
-                    f"{len(summary_records)} summaries generated, latency: {end_at - start_at}",
-                    fg="green",
-                )
+        end_at = time.perf_counter()
+        logger.info(
+            click.style(
+                f"Summary index generation completed for document {document_id}: "
+                f"{len(summary_records)} summaries generated, latency: {end_at - start_at}",
+                fg="green",
             )
+        )
 
     except Exception as e:
         logger.exception("Failed to generate summary index for document %s", document_id)

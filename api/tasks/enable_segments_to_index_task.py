@@ -104,6 +104,7 @@ def enable_segments_to_index_task(segment_ids: list, dataset_id: str, document_i
                         )
                 documents.append(document)
             # save vector index
+            session.commit()
             index_processor.load(dataset, documents, multimodal_documents=multimodal_documents)
 
             # Enable summary indexes for these segments
@@ -111,6 +112,7 @@ def enable_segments_to_index_task(segment_ids: list, dataset_id: str, document_i
 
             segment_ids_list = [segment.id for segment in segments]
             try:
+                session.commit()
                 SummaryIndexService.enable_summaries_for_segments(
                     dataset=dataset,
                     segment_ids=segment_ids_list,

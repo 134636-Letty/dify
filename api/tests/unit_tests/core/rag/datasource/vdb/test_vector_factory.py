@@ -257,10 +257,12 @@ def test_init_vector_uses_whitelist_override(vector_factory_module, monkeypatch:
 
     monkeypatch.setattr(vector_factory_module, "Whitelist", SimpleNamespace(tenant_id=_Expr(), category=_Expr()))
     monkeypatch.setattr(vector_factory_module, "select", lambda _model: SimpleNamespace(where=lambda *_args: "stmt"))
+    session = MagicMock()
+    session.scalars.return_value.one_or_none.return_value = object()
     monkeypatch.setattr(
         vector_factory_module,
-        "db",
-        SimpleNamespace(session=SimpleNamespace(scalars=lambda _stmt: SimpleNamespace(one_or_none=lambda: object()))),
+        "session_factory",
+        SimpleNamespace(create_session=MagicMock(side_effect=AssertionError("nested session"))),
     )
     monkeypatch.setattr(vector_factory_module.dify_config, "VECTOR_STORE", vector_factory_module.VectorType.CHROMA)
     monkeypatch.setattr(vector_factory_module.dify_config, "VECTOR_STORE_WHITELIST_ENABLE", True)
@@ -275,10 +277,11 @@ def test_init_vector_uses_whitelist_override(vector_factory_module, monkeypatch:
     vector._attributes = ["doc_id"]
     vector._embeddings = "embeddings"
 
-    result = vector._init_vector()
+    result = vector._init_vector(session=session)
 
     assert result == "vector-processor"
     assert calls["vector_type"] == vector_factory_module.VectorType.TIDB_ON_QDRANT
+    session.scalars.assert_called_once()
 
 
 def test_init_vector_raises_when_vector_store_missing(vector_factory_module, monkeypatch: pytest.MonkeyPatch):

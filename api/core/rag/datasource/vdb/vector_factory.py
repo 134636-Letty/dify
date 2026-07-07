@@ -5,8 +5,10 @@ from abc import ABC, abstractmethod
 from typing import Any, override
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from configs import dify_config
+from core.db.session_factory import session_factory
 from core.model_manager import ModelManager
 from core.rag.datasource.vdb.vector_backend_registry import get_vector_factory_class
 from core.rag.datasource.vdb.vector_base import BaseVector, VectorIndexStructDict
@@ -99,7 +101,7 @@ class _LazyEmbeddings(Embeddings):
 
 
 class Vector:
-    def __init__(self, dataset: Dataset, attributes: list | None = None):
+    def __init__(self, dataset: Dataset, attributes: list | None = None, *, session: Session | None = None):
         if attributes is None:
             # `is_summary` and `original_chunk_id` are stored on summary vectors
             # by `SummaryIndexService` and read back by `RetrievalService` to
@@ -125,9 +127,9 @@ class Vector:
         # ``embed_*`` method is actually invoked (i.e. create / search paths).
         self._embeddings: Embeddings = _LazyEmbeddings(dataset)
         self._attributes = attributes
-        self._vector_processor = self._init_vector()
+        self._vector_processor = self._init_vector(session=session)
 
-    def _init_vector(self) -> BaseVector:
+    def _init_vector(self, *, session: Session | None = None) -> BaseVector:
         vector_type = dify_config.VECTOR_STORE
 
         if self._dataset.index_struct_dict:
@@ -137,7 +139,11 @@ class Vector:
                 stmt = select(Whitelist).where(
                     Whitelist.tenant_id == self._dataset.tenant_id, Whitelist.category == "vector_db"
                 )
-                whitelist = db.session.scalars(stmt).one_or_none()
+                if session is None:
+                    with session_factory.create_session() as query_session:
+                        whitelist = query_session.scalars(stmt).one_or_none()
+                else:
+                    whitelist = session.scalars(stmt).one_or_none()
                 if whitelist:
                     vector_type = VectorType.TIDB_ON_QDRANT
 
