@@ -815,7 +815,7 @@ class AccountService:
         account: Account | None = None,
         email: str | None = None,
         language: str = "en-US",
-        workspace_name: str | None = "",
+        workspace_name: str = "",
     ):
         account_email = account.email if account else email
         if account_email is None:
@@ -844,7 +844,7 @@ class AccountService:
         account: Account | None = None,
         email: str | None = None,
         language: str = "en-US",
-        workspace_name: str | None = "",
+        workspace_name: str = "",
         new_owner_email: str = "",
     ):
         account_email = account.email if account else email
@@ -865,7 +865,7 @@ class AccountService:
         account: Account | None = None,
         email: str | None = None,
         language: str = "en-US",
-        workspace_name: str | None = "",
+        workspace_name: str = "",
     ):
         account_email = account.email if account else email
         if account_email is None:
