@@ -1610,6 +1610,7 @@ export type ConversationVariableResponse = {
 }
 
 export type AgentThought = {
+  answer?: string | null
   chain_id?: string | null
   created_at?: number | null
   files: Array<string>
