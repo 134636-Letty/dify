@@ -6,11 +6,12 @@ import { Button } from '@langgenius/dify-ui/button'
 import { cn } from '@langgenius/dify-ui/cn'
 import { Popover, PopoverContent } from '@langgenius/dify-ui/popover'
 import { useQuery } from '@tanstack/react-query'
+import { useAtomValue } from 'jotai'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { buildIntegrationPath } from '@/app/components/integrations/routes'
 import { IS_CLOUD_EDITION } from '@/config'
-import { useAppContext } from '@/context/app-context'
+import { currentWorkspaceAtom, isCurrentWorkspaceManagerAtom, workspacePermissionKeysAtom } from '@/context/app-context-state'
 import { useDocLink } from '@/context/i18n'
 import { useModalContextSelector } from '@/context/modal-context'
 import { systemFeaturesQueryOptions } from '@/features/system-features/client'
@@ -133,7 +134,9 @@ export default function StepByStepTourMount({
   const pathname = usePathname()
   const docLink = useDocLink()
   const { t } = useTranslation('common')
-  const { currentWorkspace, isCurrentWorkspaceManager, workspacePermissionKeys } = useAppContext()
+  const currentWorkspace = useAtomValue(currentWorkspaceAtom)
+  const isCurrentWorkspaceManager = useAtomValue(isCurrentWorkspaceManagerAtom)
+  const workspacePermissionKeys = useAtomValue(workspacePermissionKeysAtom)
   const hasBlockingModalOpen = useModalContextSelector(state => state.hasBlockingModalOpen)
   const { data: systemFeatures } = useQuery(systemFeaturesQueryOptions())
   const accountState = useStepByStepTourAccountValue()
@@ -171,6 +174,7 @@ export default function StepByStepTourMount({
   const enabledForCurrentWorkspace = getStepByStepTourEnabledForCurrentWorkspace(accountState, currentWorkspaceId)
   const completedTaskIds = accountState.completedTaskIds
   const learnDifyEnabled = systemFeatures?.enable_learn_app ?? true
+  const stepByStepTourFeatureEnabled = Boolean(systemFeatures?.enable_step_by_step_tour)
   const availableTasks = learnDifyEnabled
     ? STEP_BY_STEP_TOUR_TASKS
     : STEP_BY_STEP_TOUR_TASKS.filter(task => task.id !== 'home')
@@ -213,6 +217,7 @@ export default function StepByStepTourMount({
       }
     : undefined
   const visible = IS_CLOUD_EDITION
+    && stepByStepTourFeatureEnabled
     && enabledForCurrentWorkspace
     && (hasActiveGuide || !shouldHideOnPathname(pathname))
   const overlayVisible = visible && !hasBlockingModalOpen

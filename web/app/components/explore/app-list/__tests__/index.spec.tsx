@@ -17,7 +17,6 @@ import {
   StepByStepTourTestUiStateHydrator,
 } from '@/app/components/step-by-step-tour/__tests__/test-utils'
 import { STEP_BY_STEP_TOUR_TARGETS } from '@/app/components/step-by-step-tour/target-registry'
-import { useAppContext } from '@/context/app-context'
 import { fetchAppDetail, fetchAppList, fetchBanners } from '@/service/explore'
 import { renderWithNuqs } from '@/test/nuqs-testing'
 import { AppModeEnum } from '@/types/app'
@@ -25,12 +24,10 @@ import { AppACLPermission } from '@/utils/permission'
 import { LEARN_DIFY_HIDDEN_STORAGE_KEY } from '../../learn-dify/storage'
 import AppList from '../index'
 
-type MockAppContext = {
-  userProfile: { id: string }
-  workspacePermissionKeys: string[]
-}
-
-const mockUseAppContext = vi.hoisted(() => vi.fn<() => MockAppContext>())
+const mockAppContextState = vi.hoisted(() => ({
+  userProfile: { id: 'user-1' },
+  workspacePermissionKeys: [] as string[],
+}))
 
 let mockExploreData: { categories: string[], allList: App[] } | undefined = { categories: [], allList: [] }
 let mockLearnDifyApps: App[] = []
@@ -49,7 +46,6 @@ const mockStepByStepTour = vi.hoisted(() => {
   const createState = (
     overrides: Partial<StepByStepTourStateResponse> = {},
   ): StepByStepTourStateResponse => ({
-    eligible: true,
     first_workspace_id: 'workspace-1',
     skipped: false,
     completed_task_ids: [],
@@ -256,10 +252,17 @@ vi.mock('@/service/client', () => ({
   },
 }))
 
-vi.mock('@/context/app-context', () => ({
-  useAppContext: mockUseAppContext,
-  useSelector: <T,>(selector: (state: MockAppContext) => T): T => selector(mockUseAppContext()),
-}))
+vi.mock('@/context/app-context-state', async (importOriginal) => {
+  const { createAppContextStateAtomMock } = await import('@/__tests__/utils/mock-app-context-state')
+
+  return createAppContextStateAtomMock(importOriginal, () => mockAppContextState)
+})
+
+vi.mock('jotai', async (importOriginal) => {
+  const { createAppContextStateJotaiMock } = await import('@/__tests__/utils/mock-app-context-state')
+
+  return createAppContextStateJotaiMock(importOriginal)
+})
 
 vi.mock('@/hooks/use-import-dsl', () => ({
   useImportDSL: () => ({
@@ -429,15 +432,7 @@ const createBanner = (overrides: Partial<BannerType> = {}): BannerType => ({
 })
 
 const mockAppCreatePermission = (hasEditPermission: boolean) => {
-  ;(useAppContext as Mock).mockReturnValue({
-    currentWorkspace: {
-      id: 'workspace-1',
-      name: 'Solar Studio',
-      role: 'owner',
-    },
-    userProfile: { id: 'user-1' },
-    workspacePermissionKeys: hasEditPermission ? ['app.create_and_management'] : [],
-  })
+  mockAppContextState.workspacePermissionKeys = hasEditPermission ? ['app.create_and_management'] : []
 }
 
 type RenderOptions = {
@@ -1080,13 +1075,10 @@ describe('AppList', () => {
         throw new Error('Step-by-step tour state should be ready before restarting the home tour.')
       unmount()
       mockStepByStepTour.setState({
-        active_task_id: 'home',
-        active_guide_index: 0,
         completed_task_ids: abandonedTourState.completedTaskIds,
         first_workspace_id: abandonedTourState.firstWorkspaceId,
         manually_disabled_workspace_ids: abandonedTourState.manuallyDisabledWorkspaceIds,
         manually_enabled_workspace_ids: abandonedTourState.manuallyEnabledWorkspaceIds,
-        minimized: true,
         skipped: abandonedTourState.skipped,
       })
       mockStepByStepTour.setUiState({

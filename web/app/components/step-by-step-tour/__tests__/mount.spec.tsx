@@ -3,7 +3,8 @@ import type {
   StepByStepTourStateResponse,
 } from '@dify/contracts/api/console/onboarding/types.gen'
 import type { StepByStepTourAccountState, StepByStepTourUiState } from '../types'
-import type { AppContextValue } from '@/context/app-context'
+import type { AppContextStateMockState } from '@/__tests__/utils/mock-app-context-state'
+import type { ICurrentWorkspace } from '@/models/common'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createStore, Provider as JotaiProvider } from 'jotai'
@@ -20,7 +21,7 @@ import {
   StepByStepTourTestUiStateHydrator,
 } from './test-utils'
 
-type WorkspaceRole = NonNullable<AppContextValue['currentWorkspace']>['role']
+type WorkspaceRole = ICurrentWorkspace['role']
 
 const mockRouterPush = vi.fn()
 let mockPathname = '/apps'
@@ -45,6 +46,9 @@ const mockCurrentWorkspaceRole = vi.hoisted(() => ({
 const mockEnableLearnApp = vi.hoisted(() => ({
   value: true,
 }))
+const mockEnableStepByStepTour = vi.hoisted(() => ({
+  value: true,
+}))
 const mockHasBlockingModalOpen = vi.hoisted(() => ({
   value: false,
 }))
@@ -53,8 +57,7 @@ const mockStepByStepTour = vi.hoisted(() => {
   const createState = (
     overrides: Partial<StepByStepTourStateResponse> = {},
   ): StepByStepTourStateResponse => ({
-    eligible: overrides.eligible ?? true,
-    first_workspace_id: overrides.first_workspace_id ?? 'workspace-1',
+    first_workspace_id: overrides.first_workspace_id === undefined ? 'workspace-1' : overrides.first_workspace_id,
     skipped: overrides.skipped ?? false,
     completed_task_ids: overrides.completed_task_ids ?? [],
     manually_enabled_workspace_ids: overrides.manually_enabled_workspace_ids ?? [],
@@ -80,7 +83,6 @@ const mockStepByStepTour = vi.hoisted(() => {
     activeGuideIndexes: uiState.activeGuideIndexes,
     activeTaskId: uiState.activeTaskId,
     completedTaskIds: (state.completed_task_ids ?? []).filter(Boolean),
-    eligible: Boolean(state.eligible),
     firstWorkspaceId: state.first_workspace_id ?? undefined,
     manuallyDisabledWorkspaceIds: state.manually_disabled_workspace_ids ?? [],
     manuallyEnabledWorkspaceIds: state.manually_enabled_workspace_ids ?? [],
@@ -159,7 +161,6 @@ const mockStepByStepTour = vi.hoisted(() => {
     setTestState(nextState: Partial<StepByStepTourAccountState>) {
       state = createState({
         completed_task_ids: nextState.completedTaskIds,
-        eligible: nextState.eligible,
         first_workspace_id: nextState.firstWorkspaceId,
         manually_disabled_workspace_ids: nextState.manuallyDisabledWorkspaceIds,
         manually_enabled_workspace_ids: nextState.manuallyEnabledWorkspaceIds,
@@ -344,8 +345,10 @@ vi.mock('react-i18next', async () => {
   }
 })
 
-vi.mock('@/context/app-context', () => ({
-  useAppContext: () => ({
+vi.mock('@/context/app-context-state', async (importOriginal) => {
+  const { createAppContextStateAtomMock } = await import('@/__tests__/utils/mock-app-context-state')
+
+  return createAppContextStateAtomMock(importOriginal, () => ({
     currentWorkspace: {
       id: 'workspace-1',
       name: 'Solar Studio',
@@ -360,8 +363,14 @@ vi.mock('@/context/app-context', () => ({
     },
     isCurrentWorkspaceManager: mockIsCurrentWorkspaceManager.value,
     workspacePermissionKeys: mockWorkspacePermissionKeys.value,
-  } satisfies Partial<AppContextValue>),
-}))
+  } satisfies AppContextStateMockState))
+})
+
+vi.mock('jotai', async (importOriginal) => {
+  const { createAppContextStateJotaiMock } = await import('@/__tests__/utils/mock-app-context-state')
+
+  return createAppContextStateJotaiMock(importOriginal)
+})
 
 type TestRect = {
   height: number
@@ -437,6 +446,7 @@ const renderStepByStepTourMount = () => {
   queryClient.setQueryData(systemFeaturesQueryOptions().queryKey, {
     ...defaultSystemFeatures,
     enable_learn_app: mockEnableLearnApp.value,
+    enable_step_by_step_tour: mockEnableStepByStepTour.value,
   })
   const jotaiStore = createStore()
 
@@ -468,6 +478,7 @@ describe('StepByStepTourMount', () => {
     mockIsCurrentWorkspaceManager.value = true
     mockCurrentWorkspaceRole.value = 'owner'
     mockEnableLearnApp.value = true
+    mockEnableStepByStepTour.value = true
     mockHasBlockingModalOpen.value = false
     mockPathname = '/apps'
     localStorage.clear()
@@ -489,6 +500,32 @@ describe('StepByStepTourMount', () => {
     await waitFor(() => {
       const state = mockStepByStepTour.observedState
       expect(state.firstWorkspaceId).toBe('workspace-1')
+    })
+  })
+
+  it('does not render the checklist when the Step-by-step Tour feature is disabled', async () => {
+    mockEnableStepByStepTour.value = false
+
+    renderStepByStepTourMount()
+
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'Get to know Dify' })).not.toBeInTheDocument()
+    })
+  })
+
+  it('keeps existing accounts hidden by default without a first workspace or manual enable', async () => {
+    mockStepByStepTour.setState({
+      first_workspace_id: null,
+      manually_enabled_workspace_ids: [],
+      manually_disabled_workspace_ids: [],
+      completed_task_ids: [],
+      skipped: false,
+    })
+
+    renderStepByStepTourMount()
+
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'Get to know Dify' })).not.toBeInTheDocument()
     })
   })
 
