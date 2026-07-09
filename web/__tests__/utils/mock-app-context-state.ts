@@ -1,4 +1,5 @@
-import type { ICurrentWorkspace, LangGeniusVersionResponse } from '@/models/common'
+import type { LangGeniusVersionInfo } from '@/context/app-context-types'
+import type { ICurrentWorkspace } from '@/models/common'
 
 const APP_CONTEXT_STATE_ATOM_KIND = Symbol('app-context-state-atom-kind')
 
@@ -22,7 +23,7 @@ export type AppContextStateMockState = {
   isLoadingCurrentWorkspace?: boolean
   isLoadingWorkspacePermissionKeys?: boolean
   workspacePermissionKeys?: string[]
-  langGeniusVersionInfo?: Partial<LangGeniusVersionResponse>
+  langGeniusVersionInfo?: Partial<LangGeniusVersionInfo>
   refreshUserProfile?: () => void
   refreshCurrentWorkspace?: () => void
   mutateUserProfile?: () => void
@@ -75,6 +76,7 @@ const defaultCurrentWorkspace = {
   providers: [],
   trial_credits: 0,
   trial_credits_used: 0,
+  trial_credits_exhausted_at: 0,
   next_credit_reset_date: 0,
 } satisfies ICurrentWorkspace
 
@@ -85,8 +87,12 @@ const defaultLangGeniusVersionInfo = {
   version: '',
   release_date: '',
   release_notes: '',
+  features: {
+    can_replace_logo: false,
+    model_load_balancing_enabled: false,
+  },
   can_auto_update: false,
-} satisfies LangGeniusVersionResponse
+} satisfies LangGeniusVersionInfo
 
 let appContextStateMockRegistry: AppContextStateMockRegistry | undefined
 
@@ -110,7 +116,7 @@ const getCurrentWorkspace = (state: AppContextStateMockState): ICurrentWorkspace
   ...state.currentWorkspace,
 })
 
-const getLangGeniusVersionInfo = (state: AppContextStateMockState): LangGeniusVersionResponse => ({
+const getLangGeniusVersionInfo = (state: AppContextStateMockState): LangGeniusVersionInfo => ({
   ...defaultLangGeniusVersionInfo,
   ...state.langGeniusVersionInfo,
 })

@@ -16,16 +16,6 @@ export type InitValidateStatusResponse = {
   status: 'finished' | 'not_started'
 }
 
-export type LangGeniusVersionResponse = {
-  current_version: string
-  latest_version: string
-  version: string
-  release_date: string
-  release_notes: string
-  can_auto_update: boolean
-  current_env: string
-}
-
 export type Member = Pick<GetAccountProfileResponse, 'id' | 'name' | 'email' | 'avatar_url'> & {
   avatar: string
   last_login_at?: string
@@ -82,6 +72,7 @@ export type ICurrentWorkspace = Omit<IWorkspace, 'current'> & {
   providers: Provider[]
   trial_credits: number
   trial_credits_used: number
+  trial_credits_exhausted_at: number
   next_credit_reset_date: number
   trial_end_reason?: string
   custom_config?: {

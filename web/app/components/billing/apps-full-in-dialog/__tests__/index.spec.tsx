@@ -2,8 +2,9 @@ import type { GetAccountProfileResponse } from '@dify/contracts/api/console/acco
 import type { Mock } from 'vitest'
 import type { AppContextStateMockState } from '@/__tests__/utils/mock-app-context-state'
 import type { UsagePlanInfo } from '@/app/components/billing/type'
+import type { LangGeniusVersionInfo } from '@/context/app-context-types'
 import type { ProviderContextState } from '@/context/provider-context'
-import type { ICurrentWorkspace, LangGeniusVersionResponse } from '@/models/common'
+import type { ICurrentWorkspace } from '@/models/common'
 import { render, screen } from '@testing-library/react'
 import { Plan } from '@/app/components/billing/type'
 import { mailToSupport } from '@/app/components/header/utils/util'
@@ -94,15 +95,20 @@ const buildAppContext = (overrides: Partial<AppContextStateMockState> = {}): App
     providers: [],
     trial_credits: 200,
     trial_credits_used: 0,
+    trial_credits_exhausted_at: 0,
     next_credit_reset_date: 0,
   }
-  const langGeniusVersionInfo: LangGeniusVersionResponse = {
+  const langGeniusVersionInfo: LangGeniusVersionInfo = {
     current_env: '',
     current_version: '1.0.0',
     latest_version: '',
     release_date: '',
     release_notes: '',
     version: '',
+    features: {
+      can_replace_logo: false,
+      model_load_balancing_enabled: false,
+    },
     can_auto_update: false,
   }
   const base: AppContextStateMockState = {

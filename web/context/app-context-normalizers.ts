@@ -1,5 +1,7 @@
+import type { GetVersionResponse } from '@dify/contracts/api/console/version/types.gen'
 import type { PostWorkspacesCurrentResponse } from '@dify/contracts/api/console/workspaces/types.gen'
-import type { ICurrentWorkspace, LangGeniusVersionResponse } from '@/models/common'
+import type { LangGeniusVersionInfo } from './app-context-types'
+import type { ICurrentWorkspace } from '@/models/common'
 import { initialLangGeniusVersionInfo, initialWorkspaceInfo } from './app-context-defaults'
 
 const workspaceRoles = new Set<ICurrentWorkspace['role']>(['owner', 'admin', 'editor', 'dataset_operator', 'normal'])
@@ -39,6 +41,8 @@ export function normalizeCurrentWorkspace(workspace?: PostWorkspacesCurrentRespo
     providers: initialWorkspaceInfo.providers,
     trial_credits: workspace.trial_credits ?? initialWorkspaceInfo.trial_credits,
     trial_credits_used: workspace.trial_credits_used ?? initialWorkspaceInfo.trial_credits_used,
+    trial_credits_exhausted_at:
+      workspace.trial_credits_exhausted_at ?? initialWorkspaceInfo.trial_credits_exhausted_at,
     next_credit_reset_date: workspace.next_credit_reset_date ?? initialWorkspaceInfo.next_credit_reset_date,
     trial_end_reason: workspace.trial_end_reason ?? undefined,
     custom_config: workspace.custom_config
@@ -64,8 +68,8 @@ export function getLangGeniusVersionInfo({
   versionData,
 }: {
   meta: ProfileMeta
-  versionData?: Omit<LangGeniusVersionResponse, 'current_version' | 'latest_version' | 'current_env'>
-}): LangGeniusVersionResponse {
+  versionData?: GetVersionResponse
+}): LangGeniusVersionInfo {
   if (!meta.currentVersion || !versionData)
     return initialLangGeniusVersionInfo
 
