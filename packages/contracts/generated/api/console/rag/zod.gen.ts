@@ -792,6 +792,18 @@ export const zDatasourceIdentity = z.object({
 })
 
 /**
+ * I18nObject
+ *
+ * Model class for i18n object.
+ */
+export const zCoreToolsEntitiesCommonEntitiesI18nObject = z.object({
+  en_US: z.string(),
+  ja_JP: z.string().nullish(),
+  pt_BR: z.string().nullish(),
+  zh_Hans: z.string().nullish(),
+})
+
+/**
  * ToolLabelEnum
  */
 export const zToolLabelEnum = z.enum([
@@ -819,9 +831,9 @@ export const zToolLabelEnum = z.enum([
  */
 export const zDatasourceProviderIdentity = z.object({
   author: z.string(),
-  description: zI18nObject,
+  description: zCoreToolsEntitiesCommonEntitiesI18nObject,
   icon: z.string(),
-  label: zI18nObject,
+  label: zCoreToolsEntitiesCommonEntitiesI18nObject,
   name: z.string(),
   tags: z.array(zToolLabelEnum).nullish().default([]),
 })
