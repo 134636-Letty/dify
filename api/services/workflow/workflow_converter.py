@@ -1,5 +1,5 @@
 import json
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -192,7 +192,7 @@ class WorkflowConverter:
                 app_model=app_model,
                 variables=app_config.variables,
                 external_data_variables=app_config.external_data_variables,
-                session=session or db.session,
+                session=cast(Session, session or db.session),
             )
 
             for http_request_node in http_request_nodes:
@@ -575,8 +575,7 @@ class WorkflowConverter:
         if new_app_mode == AppMode.ADVANCED_CHAT:
             memory = {"role_prefix": role_prefix, "window": {"enabled": False}}
 
-        completion_params = model_config.parameters
-        completion_params.update({"stop": model_config.stop})
+        completion_params = {**model_config.parameters, "stop": model_config.stop}
         return {
             "id": "llm",
             "position": None,

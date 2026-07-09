@@ -180,7 +180,6 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
             def worker_with_context():
                 return context.run(
                     self._generate_worker,
-                    session=session,
                     flask_app=current_app._get_current_object(),  # type: ignore
                     application_generate_entity=application_generate_entity,
                     queue_manager=queue_manager,
@@ -206,7 +205,6 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
     def _generate_worker(
         self,
         flask_app: Flask,
-        session: Session,
         application_generate_entity: CompletionAppGenerateEntity,
         queue_manager: AppQueueManager,
         message_id: str,
@@ -227,7 +225,6 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
                 # chatbot app
                 runner = CompletionWorkflowRunner()
                 runner.run(
-                    session=session,
                     application_generate_entity=application_generate_entity,
                     queue_manager=queue_manager,
                     message=message,
@@ -352,7 +349,6 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
             def worker_with_context():
                 return context.run(
                     self._generate_worker,
-                    session=session,
                     flask_app=current_app._get_current_object(),  # type: ignore
                     application_generate_entity=application_generate_entity,
                     queue_manager=queue_manager,
