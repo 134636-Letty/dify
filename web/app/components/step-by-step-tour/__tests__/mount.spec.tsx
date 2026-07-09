@@ -13,6 +13,7 @@ import { Plan } from '@/app/components/billing/type'
 import { systemFeaturesQueryOptions } from '@/features/system-features/client'
 import { defaultSystemFeatures } from '@/features/system-features/config'
 import StepByStepTourMount from '../mount'
+import { STEP_BY_STEP_TOUR_SHELL_MODE_STORAGE_KEY } from '../shell-storage'
 import { STEP_BY_STEP_TOUR_TARGETS } from '../target-registry'
 import { getStepByStepTourCoachmarkPosition } from '../use-coachmark-position'
 import { useStepByStepTourTargetRect } from '../use-target-rect'
@@ -683,10 +684,59 @@ describe('StepByStepTourMount', () => {
     expect(popoverPositioner).toHaveAttribute('data-align', 'start')
     expect(popoverPopup).toHaveClass('overflow-visible', 'bg-transparent', 'shadow-none')
     expect(checklist).toHaveClass('max-h-[calc(100vh-16px)]', 'overflow-y-auto')
-    expect(checklist).toHaveClass('bg-white/95', 'bg-clip-padding', 'backdrop-blur-[10px]', 'border-[#101828]/8')
+    expect(checklist).toHaveClass('bg-components-panel-bg-blur', 'bg-clip-padding', 'backdrop-blur-[10px]', 'border-components-panel-border')
     expect(screen.getByRole('button', { name: 'Skip tour' })).toHaveClass('h-6', 'px-1.5')
     expect(screen.getByRole('button', { name: 'Minimize tour' }).querySelector('span[aria-hidden="true"]'))
       .toHaveClass('i-ri-arrow-left-down-line', 'size-4')
+  })
+
+  it('persists the collapsed shell mode across remounts', async () => {
+    setStepByStepTourTestState({
+      manuallyEnabledWorkspaceIds: ['workspace-1'],
+      manuallyDisabledWorkspaceIds: [],
+      minimized: false,
+      completedTaskIds: [],
+      skipped: false,
+    })
+
+    const { unmount } = renderStepByStepTourMount()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Minimize tour' }))
+
+    await waitFor(() => {
+      expect(localStorage.getItem(STEP_BY_STEP_TOUR_SHELL_MODE_STORAGE_KEY)).toBe('collapsed')
+    })
+    expect(screen.getByRole('button', { name: 'Open step-by-step tour' })).toBeInTheDocument()
+
+    unmount()
+    renderStepByStepTourMount()
+
+    expect(await screen.findByRole('button', { name: 'Open step-by-step tour' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Get to know Dify' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open step-by-step tour' }))
+
+    await waitFor(() => {
+      expect(localStorage.getItem(STEP_BY_STEP_TOUR_SHELL_MODE_STORAGE_KEY)).toBe('expanded')
+    })
+    expect(await screen.findByRole('region', { name: 'Get to know Dify' })).toBeInTheDocument()
+  })
+
+  it('shows the completion prompt expanded even when the saved shell mode is collapsed', async () => {
+    localStorage.setItem(STEP_BY_STEP_TOUR_SHELL_MODE_STORAGE_KEY, 'collapsed')
+    setStepByStepTourTestState({
+      manuallyEnabledWorkspaceIds: ['workspace-1'],
+      manuallyDisabledWorkspaceIds: [],
+      minimized: false,
+      completedTaskIds: ['home', 'studio', 'knowledge', 'integration'],
+      skipped: false,
+    })
+
+    renderStepByStepTourMount()
+
+    expect(await screen.findByRole('region', { name: 'Step-by-step Tour completed' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Get to know Dify' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Open step-by-step tour' })).not.toBeInTheDocument()
   })
 
   it('hides expanded tour overlays while a blocking modal is open', async () => {
@@ -709,6 +759,7 @@ describe('StepByStepTourMount', () => {
 
   it('keeps the minimized tour entry available while a blocking modal is open', async () => {
     mockHasBlockingModalOpen.value = true
+    localStorage.setItem(STEP_BY_STEP_TOUR_SHELL_MODE_STORAGE_KEY, 'collapsed')
     setStepByStepTourTestState({
       manuallyEnabledWorkspaceIds: ['workspace-1'],
       manuallyDisabledWorkspaceIds: [],
@@ -1024,7 +1075,8 @@ describe('StepByStepTourMount', () => {
       expect(mockRouterPush).toHaveBeenCalledWith('/')
       expect(await screen.findByRole('region', { name: 'Pick a lesson to see how it works.' })).toBeInTheDocument()
       expect(screen.queryByText('Try a Learn Dify lesson')).not.toBeInTheDocument()
-      expect(screen.queryByText('1 of 2')).not.toBeInTheDocument()
+      expect(screen.getByText('1 of 2')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Skip tour' })).toBeInTheDocument()
       await waitFor(() => {
         const state = mockStepByStepTour.observedState
         expect(state.activeTaskId).toBe('home')
@@ -1174,9 +1226,10 @@ describe('StepByStepTourMount', () => {
 
       fireEvent.click(await screen.findByRole('button', { name: 'Show me' }))
       expect(await screen.findByText('Pick a lesson to see how it works.')).toBeInTheDocument()
+      expect(screen.getByText('1 of 2')).toBeInTheDocument()
       expect(screen.queryByRole('button', { name: 'Show me' })).not.toBeInTheDocument()
       expect(screen.queryByRole('button', { name: 'Got it' })).not.toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: 'Skip tour' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Skip tour' })).toBeInTheDocument()
       expect(screen.queryByRole('link', { name: 'Learn more' })).not.toBeInTheDocument()
       expect(document.body.querySelectorAll('[data-step-by-step-tour-blocker]')).toHaveLength(4)
 
@@ -1264,6 +1317,8 @@ describe('StepByStepTourMount', () => {
       expect(Array.from(document.body.children).indexOf(tourPortalRoot!)).toBeGreaterThan(
         Array.from(document.body.children).indexOf(existingDialogLayer),
       )
+      expect(screen.getByText('2 of 2')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Skip tour' })).toBeInTheDocument()
       expect(coachmarkRegion).toHaveClass('bg-state-accent-hover', 'border-state-accent-hover-alt')
       expect(highlightOverlay?.parentElement).toBe(tourPortalRoot)
       expect(backdropOverlay?.parentElement).toBe(tourPortalRoot)
@@ -2380,9 +2435,11 @@ describe('StepByStepTourMount', () => {
         expect(state.activeGuideIndex).toBeUndefined()
         expect(state.activeGuideGroup).toBeUndefined()
         expect(state.completedTaskIds).toEqual(['home', 'studio', 'knowledge'])
-        expect(state.minimized).toBe(true)
+        expect(state.minimized).toBe(false)
         expect(state.skipped).toBe(false)
       })
+      expect(localStorage.getItem(STEP_BY_STEP_TOUR_SHELL_MODE_STORAGE_KEY)).toBe('expanded')
+      expect(screen.getByRole('region', { name: 'Get to know Dify' })).toBeInTheDocument()
       expect(screen.queryByRole('region', { name: 'Step-by-step Tour recovery tip' })).not.toBeInTheDocument()
     }
     finally {
