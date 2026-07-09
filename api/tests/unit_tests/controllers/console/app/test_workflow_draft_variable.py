@@ -79,28 +79,34 @@ def test_workflow_variable_collection_get_returns_without_value_contract(
 ) -> None:
     variable = _node_variable()
     captured_args: dict[str, Any] = {}
+    workflow_session = object()
+    draft_variable_session = object()
 
     class WorkflowService:
-        def is_workflow_exist(self, *, app_model: Any) -> bool:
+        def is_workflow_exist(self, *, app_model: Any, session: object) -> bool:
             captured_args["workflow_app_id"] = app_model.id
+            captured_args["workflow_session"] = session
             return True
 
     class DraftVariableService:
         def __init__(self, *, session: object) -> None:
-            captured_args["session"] = session
+            captured_args["draft_variable_session"] = session
 
         def list_variables_without_values(self, **kwargs: Any) -> WorkflowDraftVariableList:
             captured_args.update(kwargs)
             return WorkflowDraftVariableList(variables=[variable], total=None)
 
-    session = object()
     monkeypatch.setattr(draft_variable_module, "WorkflowService", WorkflowService)
     monkeypatch.setattr(draft_variable_module, "WorkflowDraftVariableService", DraftVariableService)
-    monkeypatch.setattr(draft_variable_module, "db", SimpleNamespace(engine=object()))
+    monkeypatch.setattr(
+        draft_variable_module,
+        "db",
+        SimpleNamespace(engine=object(), session=lambda: workflow_session),
+    )
     monkeypatch.setattr(
         draft_variable_module,
         "sessionmaker",
-        lambda *_args, **_kwargs: SimpleNamespace(begin=lambda: nullcontext(session)),
+        lambda *_args, **_kwargs: SimpleNamespace(begin=lambda: nullcontext(draft_variable_session)),
     )
 
     api = WorkflowVariableCollectionApi()
@@ -128,7 +134,8 @@ def test_workflow_variable_collection_get_returns_without_value_contract(
 
     assert captured_args == {
         "workflow_app_id": _TEST_APP_ID,
-        "session": session,
+        "workflow_session": workflow_session,
+        "draft_variable_session": draft_variable_session,
         "app_id": _TEST_APP_ID,
         "page": 2,
         "limit": 3,
@@ -299,6 +306,7 @@ def test_variable_patch_file_value_forwards_raw_mapping_to_file_factory(
 def test_environment_variable_collection_get_returns_response_model_contract(
     app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    workflow_session = object()
     env_var = SimpleNamespace(
         id="env-1",
         name="API_KEY",
@@ -309,11 +317,13 @@ def test_environment_variable_collection_get_returns_response_model_contract(
     )
 
     class WorkflowService:
-        def get_draft_workflow(self, *, app_model: Any) -> SimpleNamespace:
+        def get_draft_workflow(self, *, app_model: Any, session: object) -> SimpleNamespace:
             assert app_model.id == _TEST_APP_ID
+            assert session is workflow_session
             return SimpleNamespace(environment_variables=[env_var])
 
     monkeypatch.setattr(draft_variable_module, "WorkflowService", WorkflowService)
+    monkeypatch.setattr(draft_variable_module, "db", SimpleNamespace(session=lambda: workflow_session))
 
     api = EnvironmentVariableCollectionApi()
     handler = unwrap(api.get)
