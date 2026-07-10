@@ -1,20 +1,19 @@
-"""Unit tests for AgentAppGenerator agent/snapshot resolution.
-
-Covers the DB-backed resolution helpers (the bound roster Agent + its published
-Agent Soul snapshot) including every not-found error path, using a fake session
-that returns queued rows.
-"""
+"""Unit tests for database-backed Agent App agent/snapshot resolution."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any
+from uuid import uuid4
 
 import pytest
+from sqlalchemy.orm import Session
 
-from core.app.apps.agent_app import app_generator as gen_mod
+import core.app.apps.agent_app.app_generator as gen_mod
 from core.app.apps.agent_app.app_generator import AgentAppGenerator, AgentAppGeneratorError, AgentAppNotPublishedError
 from core.app.entities.app_invoke_entities import InvokeFrom
+from models.account import Account
+from models.agent import Agent, AgentConfigDraft, AgentConfigSnapshot, AgentScope, AgentSource, AgentStatus
+from models.agent_config_entities import AgentSoulConfig
+from models.model import App, AppMode, IconType
 
 _SOUL_DICT = {
     "model": {
@@ -24,34 +23,95 @@ _SOUL_DICT = {
     },
     "prompt": {"system_prompt": "You are Iris."},
 }
+AGENT_MODELS = (Agent, AgentConfigSnapshot, AgentConfigDraft)
 
 
-class _FakeScalarSession:
-    """db.session stub: scalar() pops the next queued row (ignores the stmt)."""
+class _DatabaseBinding:
+    """Expose the real SQLite session to generator code using ``db.session``."""
 
-    def __init__(self, values: list[Any]) -> None:
-        self._values = list(values)
+    session: Session
 
-    def scalar(self, _stmt: Any) -> Any:
-        return self._values.pop(0) if self._values else None
-
-
-def _patch_session(monkeypatch, values: list[Any]) -> None:
-    monkeypatch.setattr(gen_mod, "db", SimpleNamespace(session=_FakeScalarSession(values)))
+    def __init__(self, session: Session) -> None:
+        self.session = session
 
 
-def _snapshot() -> SimpleNamespace:
-    return SimpleNamespace(id="snap-1", config_snapshot_dict=_SOUL_DICT)
+def _agent(*, tenant_id: str, app_id: str | None = None, snapshot_id: str | None = None) -> Agent:
+    return Agent(
+        tenant_id=tenant_id,
+        name=f"Agent {uuid4()}",
+        description="",
+        role="",
+        icon_type=None,
+        icon=None,
+        icon_background=None,
+        scope=AgentScope.ROSTER,
+        source=AgentSource.AGENT_APP,
+        app_id=app_id,
+        backing_app_id=None,
+        workflow_id=None,
+        workflow_node_id=None,
+        active_config_snapshot_id=snapshot_id,
+        active_config_has_model=snapshot_id is not None,
+        active_config_is_published=True,
+        status=AgentStatus.ACTIVE,
+        created_by=None,
+        updated_by=None,
+        archived_by=None,
+        archived_at=None,
+    )
 
 
+def _snapshot(*, tenant_id: str, agent_id: str, version: int = 1) -> AgentConfigSnapshot:
+    return AgentConfigSnapshot(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        version=version,
+        config_snapshot=AgentSoulConfig.model_validate(_SOUL_DICT),
+        summary=None,
+        version_note=None,
+        created_by=None,
+    )
+
+
+def _app(*, tenant_id: str, app_id: str) -> App:
+    app = App(
+        tenant_id=tenant_id,
+        name="Agent App",
+        description="",
+        mode=AppMode.AGENT,
+        icon_type=IconType.EMOJI,
+        icon="🤖",
+        icon_background="#fff",
+        enable_site=True,
+        enable_api=True,
+        max_active_requests=0,
+    )
+    app.id = app_id
+    return app
+
+
+def _user() -> Account:
+    user = Account(name="Tester", email=f"{uuid4()}@example.com")
+    user.id = str(uuid4())
+    return user
+
+
+@pytest.mark.parametrize("sqlite_session", [AGENT_MODELS], indirect=True)
 class TestResolveAgentById:
-    def test_success_returns_agent_snapshot_soul(self, monkeypatch: pytest.MonkeyPatch):
-        agent = SimpleNamespace(id="agent-1")
-        snapshot = _snapshot()
-        _patch_session(monkeypatch, [agent, snapshot])
+    def test_success_returns_agent_snapshot_soul(
+        self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
+    ) -> None:
+        tenant_id = str(uuid4())
+        agent = _agent(tenant_id=tenant_id)
+        sqlite_session.add(agent)
+        sqlite_session.flush()
+        snapshot = _snapshot(tenant_id=tenant_id, agent_id=agent.id)
+        sqlite_session.add(snapshot)
+        sqlite_session.commit()
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
 
         resolved_agent, resolved_snapshot, soul = AgentAppGenerator._resolve_agent_by_id(
-            tenant_id="t1", agent_id="agent-1", snapshot_id="snap-1"
+            tenant_id=tenant_id, agent_id=agent.id, snapshot_id=snapshot.id
         )
 
         assert resolved_agent is agent
@@ -60,90 +120,115 @@ class TestResolveAgentById:
         assert soul.model is not None
         assert soul.model.model == "gpt-4o-mini"
 
-    def test_agent_missing_raises(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_session(monkeypatch, [None])
+    def test_agent_missing_raises(self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session) -> None:
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
+
         with pytest.raises(AgentAppGeneratorError, match="Agent not found"):
-            AgentAppGenerator._resolve_agent_by_id(tenant_id="t1", agent_id="x", snapshot_id="snap-1")
+            AgentAppGenerator._resolve_agent_by_id(
+                tenant_id=str(uuid4()), agent_id=str(uuid4()), snapshot_id=str(uuid4())
+            )
 
-    def test_no_published_version_raises(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_session(monkeypatch, [SimpleNamespace(id="agent-1")])
+    def test_no_published_version_raises(self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session) -> None:
+        tenant_id = str(uuid4())
+        agent = _agent(tenant_id=tenant_id)
+        sqlite_session.add(agent)
+        sqlite_session.commit()
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
+
         with pytest.raises(AgentAppGeneratorError, match="no published version"):
-            AgentAppGenerator._resolve_agent_by_id(tenant_id="t1", agent_id="agent-1", snapshot_id=None)
+            AgentAppGenerator._resolve_agent_by_id(tenant_id=tenant_id, agent_id=agent.id, snapshot_id=None)
 
-    def test_snapshot_missing_raises(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_session(monkeypatch, [SimpleNamespace(id="agent-1"), None])
+    def test_snapshot_missing_raises(self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session) -> None:
+        tenant_id = str(uuid4())
+        agent = _agent(tenant_id=tenant_id)
+        sqlite_session.add(agent)
+        sqlite_session.commit()
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
+
         with pytest.raises(AgentAppGeneratorError, match="published version not found"):
-            AgentAppGenerator._resolve_agent_by_id(tenant_id="t1", agent_id="agent-1", snapshot_id="snap-1")
+            AgentAppGenerator._resolve_agent_by_id(tenant_id=tenant_id, agent_id=agent.id, snapshot_id=str(uuid4()))
 
 
+@pytest.mark.parametrize("sqlite_session", [AGENT_MODELS], indirect=True)
 class TestResolveAgent:
-    def test_success_chains_to_resolve_by_id(self, monkeypatch: pytest.MonkeyPatch):
-        bound_agent = SimpleNamespace(id="agent-1", active_config_snapshot_id="snap-1", active_config_is_published=True)
-        inner_agent = SimpleNamespace(id="agent-1")
-        snapshot = _snapshot()
-        # scalar order: bound agent (in _resolve_agent), then agent + snapshot (in _resolve_agent_by_id)
-        _patch_session(monkeypatch, [bound_agent, inner_agent, snapshot])
-        app_model = SimpleNamespace(id="app-1", tenant_id="t1")
+    @staticmethod
+    def _persist_bound_agent(sqlite_session: Session, *, published: bool) -> tuple[App, Agent, AgentConfigSnapshot]:
+        tenant_id = str(uuid4())
+        app = _app(tenant_id=tenant_id, app_id=str(uuid4()))
+        agent = _agent(tenant_id=tenant_id, app_id=app.id)
+        sqlite_session.add(agent)
+        sqlite_session.flush()
+        snapshot = _snapshot(tenant_id=tenant_id, agent_id=agent.id)
+        sqlite_session.add(snapshot)
+        sqlite_session.flush()
+        agent.active_config_snapshot_id = snapshot.id
+        agent.active_config_has_model = True
+        agent.active_config_is_published = published
+        sqlite_session.commit()
+        return app, agent, snapshot
+
+    def test_success_chains_to_resolve_by_id(self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session) -> None:
+        app, bound_agent, snapshot = self._persist_bound_agent(sqlite_session, published=True)
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
 
         agent, config_id, config_version_kind, soul = AgentAppGenerator()._resolve_agent(
-            app_model,
+            app,
             invoke_from=InvokeFrom.WEB_APP,
             draft_type=None,
-            user=SimpleNamespace(id="user-1"),
-        )  # type: ignore[arg-type]
+            user=_user(),
+        )
 
         assert agent is bound_agent
         assert config_id == snapshot.id
         assert config_version_kind == "snapshot"
         assert soul.model is not None
 
-    def test_unpublished_draft_still_resolves_active_snapshot(self, monkeypatch: pytest.MonkeyPatch):
-        bound_agent = SimpleNamespace(
-            id="agent-1",
-            active_config_snapshot_id="snap-1",
-            active_config_is_published=False,
-        )
-        inner_agent = SimpleNamespace(id="agent-1")
-        snapshot = _snapshot()
-        _patch_session(monkeypatch, [bound_agent, inner_agent, snapshot])
-        app_model = SimpleNamespace(id="app-1", tenant_id="t1")
+    def test_unpublished_draft_still_resolves_active_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
+    ) -> None:
+        app, bound_agent, snapshot = self._persist_bound_agent(sqlite_session, published=False)
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
 
         agent, config_id, config_version_kind, soul = AgentAppGenerator()._resolve_agent(
-            app_model,
+            app,
             invoke_from=InvokeFrom.WEB_APP,
             draft_type=None,
-            user=SimpleNamespace(id="user-1"),
-        )  # type: ignore[arg-type]
+            user=_user(),
+        )
 
         assert agent is bound_agent
         assert config_id == snapshot.id
         assert config_version_kind == "snapshot"
         assert soul.prompt.system_prompt == "You are Iris."
 
-    def test_agent_without_active_snapshot_raises_before_model_resolution(self, monkeypatch: pytest.MonkeyPatch):
-        bound_agent = SimpleNamespace(
-            id="agent-1",
-            active_config_snapshot_id=None,
-            active_config_is_published=False,
-        )
-        _patch_session(monkeypatch, [bound_agent])
-        app_model = SimpleNamespace(id="app-1", tenant_id="t1")
+    def test_agent_without_active_snapshot_raises_before_model_resolution(
+        self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
+    ) -> None:
+        tenant_id = str(uuid4())
+        app = _app(tenant_id=tenant_id, app_id=str(uuid4()))
+        sqlite_session.add(_agent(tenant_id=tenant_id, app_id=app.id))
+        sqlite_session.commit()
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
 
         with pytest.raises(AgentAppNotPublishedError, match="not been published"):
             AgentAppGenerator()._resolve_agent(
-                app_model,
+                app,
                 invoke_from=InvokeFrom.WEB_APP,
                 draft_type=None,
-                user=SimpleNamespace(id="user-1"),
-            )  # type: ignore[arg-type]
+                user=_user(),
+            )
 
-    def test_unbound_app_raises(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_session(monkeypatch, [None])
-        app_model = SimpleNamespace(id="app-1", tenant_id="t1")
+    def test_unbound_app_raises(self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session) -> None:
+        tenant_id = str(uuid4())
+        app = _app(tenant_id=tenant_id, app_id=str(uuid4()))
+        sqlite_session.add(_agent(tenant_id=tenant_id, app_id=str(uuid4())))
+        sqlite_session.commit()
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
+
         with pytest.raises(AgentAppGeneratorError, match="has no bound Agent"):
             AgentAppGenerator()._resolve_agent(
-                app_model,
+                app,
                 invoke_from=InvokeFrom.WEB_APP,
                 draft_type=None,
-                user=SimpleNamespace(id="user-1"),
-            )  # type: ignore[arg-type]
+                user=_user(),
+            )
