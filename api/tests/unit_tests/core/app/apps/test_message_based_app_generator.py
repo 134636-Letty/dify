@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
+from sqlalchemy.orm import Session
 
 from core.app.app_config.entities import (
     AppAdditionalFeatures,
@@ -16,7 +17,7 @@ from core.app.apps import message_based_app_generator
 from core.app.apps.exc import GenerateTaskStoppedError
 from core.app.apps.message_based_app_generator import MessageBasedAppGenerator
 from core.app.entities.app_invoke_entities import ChatAppGenerateEntity, InvokeFrom
-from models.model import AppMode, Conversation, Message
+from models.model import App, AppMode, AppModelConfig, Conversation, ConversationFromSource, IconType, Message
 from services.errors.app_model_config import AppModelConfigBrokenError
 
 
@@ -84,25 +85,20 @@ def _make_chat_generate_entity(app_config: EasyUIBasedAppConfig) -> ChatAppGener
     )
 
 
-@pytest.fixture(autouse=True)
-def _mock_db_session(monkeypatch: pytest.MonkeyPatch):
-    session = MagicMock()
+class _DatabaseBinding:
+    """Expose the real SQLite session to generator code using ``db.session``."""
 
-    def refresh_side_effect(obj):
-        if isinstance(obj, Conversation) and obj.id is None:
-            obj.id = "generated-conversation-id"
-        if isinstance(obj, Message) and obj.id is None:
-            obj.id = "generated-message-id"
+    session: Session
 
-    session.refresh.side_effect = refresh_side_effect
-    session.add.return_value = None
-    session.commit.return_value = None
-
-    monkeypatch.setattr(message_based_app_generator, "db", SimpleNamespace(session=session))
-    return session
+    def __init__(self, session: Session) -> None:
+        self.session = session
 
 
-def test_init_generate_records_skips_conversation_fields_for_non_conversation_entity():
+@pytest.mark.parametrize("sqlite_session", [(Conversation, Message)], indirect=True)
+def test_init_generate_records_skips_conversation_fields_for_non_conversation_entity(
+    monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
+):
+    monkeypatch.setattr(message_based_app_generator, "db", _DatabaseBinding(sqlite_session))
     app_config = _make_app_config(AppMode.COMPLETION)
     entity = DummyCompletionGenerateEntity(app_config=app_config)
 
@@ -110,13 +106,17 @@ def test_init_generate_records_skips_conversation_fields_for_non_conversation_en
 
     conversation, message = generator._init_generate_records(entity, conversation=None)
 
-    assert conversation.id == "generated-conversation-id"
-    assert message.id == "generated-message-id"
+    assert sqlite_session.get(Conversation, conversation.id) is conversation
+    assert sqlite_session.get(Message, message.id) is message
     assert hasattr(entity, "conversation_id") is False
     assert hasattr(entity, "is_new_conversation") is False
 
 
-def test_init_generate_records_sets_conversation_fields_for_chat_entity():
+@pytest.mark.parametrize("sqlite_session", [(Conversation, Message)], indirect=True)
+def test_init_generate_records_sets_conversation_fields_for_chat_entity(
+    monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
+):
+    monkeypatch.setattr(message_based_app_generator, "db", _DatabaseBinding(sqlite_session))
     app_config = _make_app_config(AppMode.CHAT)
     entity = _make_chat_generate_entity(app_config)
 
@@ -124,9 +124,9 @@ def test_init_generate_records_sets_conversation_fields_for_chat_entity():
 
     conversation, _ = generator._init_generate_records(entity, conversation=None)
 
-    assert entity.conversation_id == "generated-conversation-id"
+    assert entity.conversation_id == conversation.id
     assert entity.is_new_conversation is True
-    assert conversation.id == "generated-conversation-id"
+    assert sqlite_session.get(Conversation, conversation.id) is conversation
 
 
 class TestMessageBasedAppGeneratorExtras:
@@ -155,20 +155,52 @@ class TestMessageBasedAppGeneratorExtras:
                 stream=False,
             )
 
-    def test_get_app_model_config_requires_valid_config(self, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize("sqlite_session", [(App, Conversation, AppModelConfig)], indirect=True)
+    def test_get_app_model_config_requires_valid_config(self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session):
         generator = MessageBasedAppGenerator()
-        app_model = SimpleNamespace(id="app", app_model_config_id=None, app_model_config=None)
+        app_model = App(
+            tenant_id=str(uuid4()),
+            name="App",
+            description="",
+            mode=AppMode.CHAT,
+            icon_type=IconType.EMOJI,
+            icon="🤖",
+            icon_background="#fff",
+            enable_site=True,
+            enable_api=True,
+            max_active_requests=0,
+            app_model_config_id=None,
+        )
+        sqlite_session.add(app_model)
+        sqlite_session.commit()
+        monkeypatch.setattr(message_based_app_generator, "db", _DatabaseBinding(sqlite_session))
 
         with pytest.raises(AppModelConfigBrokenError):
             generator._get_app_model_config(app_model, conversation=None)
 
-        conversation = SimpleNamespace(app_model_config_id="missing-id")
-        monkeypatch.setattr(
-            message_based_app_generator, "db", SimpleNamespace(session=SimpleNamespace(scalar=lambda _: None))
+        conversation = Conversation(
+            app_id=app_model.id,
+            app_model_config_id=str(uuid4()),
+            model_provider="provider",
+            model_id="model",
+            override_model_configs=None,
+            mode=AppMode.CHAT,
+            name="Conversation",
+            inputs={},
+            introduction="",
+            system_instruction="",
+            system_instruction_tokens=0,
+            status="normal",
+            invoke_from=InvokeFrom.WEB_APP,
+            from_source=ConversationFromSource.API,
+            from_end_user_id=str(uuid4()),
+            from_account_id=None,
         )
+        sqlite_session.add(conversation)
+        sqlite_session.commit()
 
         with pytest.raises(AppModelConfigBrokenError):
-            generator._get_app_model_config(app_model=SimpleNamespace(id="app"), conversation=conversation)
+            generator._get_app_model_config(app_model=app_model, conversation=conversation)
 
     def test_get_conversation_introduction_handles_missing_inputs(self):
         app_config = _make_app_config(AppMode.CHAT)
