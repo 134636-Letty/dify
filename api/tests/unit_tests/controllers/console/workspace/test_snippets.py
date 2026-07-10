@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from inspect import unwrap
 from types import SimpleNamespace
@@ -5,10 +7,16 @@ from unittest.mock import ANY, Mock
 
 import pytest
 from flask import Flask
+from sqlalchemy import Engine, event
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from werkzeug.exceptions import NotFound
 
 from controllers.console.workspace import snippets as snippets_module
+from models import snippet as snippet_model_module
 from models.account import Account, TenantAccountRole
+from models.base import TypeBase
+from models.model import Tag, TagBinding
+from models.snippet import CustomizedSnippet
 from services.snippet_dsl_service import ImportStatus, SnippetImportInfo
 
 
@@ -20,16 +28,27 @@ def _patch_snippet_service_factory(monkeypatch):
     monkeypatch.setattr(snippets_module, "_snippet_service", factory)
 
 
-class _SessionContext:
-    def __init__(self, engine, *args, **kwargs):
-        self.engine = engine
-        self.session = kwargs.pop("session", None)
+@dataclass(frozen=True)
+class _SQLiteDb:
+    engine: Engine
+    session: scoped_session[Session]
 
-    def __enter__(self):
-        return self.session
 
-    def __exit__(self, exc_type, exc, tb):
-        return False
+@pytest.fixture
+def snippet_db(sqlite_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[Session]:
+    """Bind controller sessions and snippet model properties to isolated SQLite."""
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[Account.__table__, CustomizedSnippet.__table__, Tag.__table__, TagBinding.__table__],
+    )
+    session_registry = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    sqlite_db = _SQLiteDb(engine=sqlite_engine, session=session_registry)
+    monkeypatch.setattr(snippets_module, "db", sqlite_db)
+    monkeypatch.setattr(snippet_model_module, "db", sqlite_db)
+    try:
+        yield session_registry()
+    finally:
+        session_registry.remove()
 
 
 def _account(account_id: str = "account-1") -> Account:
@@ -63,6 +82,27 @@ def _snippet(**overrides) -> SimpleNamespace:
     }
     data.update(overrides)
     return SimpleNamespace(**data)
+
+
+def _customized_snippet(**overrides) -> CustomizedSnippet:
+    data = {
+        "id": "snippet-1",
+        "tenant_id": "tenant-1",
+        "name": "Snippet",
+        "description": "Description",
+        "type": snippets_module.SnippetType.NODE.value,
+        "version": 1,
+        "use_count": 0,
+        "is_published": False,
+        "icon_info": None,
+        "input_fields": "[]",
+        "created_by": None,
+        "updated_by": None,
+        "created_at": datetime.fromtimestamp(1_704_067_200, UTC).replace(tzinfo=None),
+        "updated_at": datetime.fromtimestamp(1_704_153_600, UTC).replace(tzinfo=None),
+    }
+    data.update(overrides)
+    return CustomizedSnippet(**data)
 
 
 def test_snippet_list_query_reads_repeated_values(app: Flask):
@@ -259,21 +299,28 @@ def test_patch_snippet_returns_400_for_empty_payload(app: Flask, monkeypatch: py
     assert response == {"message": "No valid fields to update"}
 
 
-def test_patch_snippet_updates_and_commits(app: Flask, monkeypatch: pytest.MonkeyPatch):
+def test_patch_snippet_updates_and_commits(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session, sqlite_engine: Engine
+):
     user = _account("account-1")
-    snippet = _snippet()
-    updated_snippet = _snippet(name="New")
-    session = SimpleNamespace(merge=Mock(return_value=snippet), commit=Mock())
-    update_snippet = Mock(return_value=updated_snippet)
+    snippet = _customized_snippet()
+    snippet_db.add_all([user, snippet])
+    snippet_db.commit()
+    snippet_db.expunge(snippet)
+    commits: list[Session] = []
+    service_sessions: list[Session] = []
 
-    class SessionContext(_SessionContext):
-        def __init__(self, engine, *args, **kwargs):
-            super().__init__(engine, *args, session=session, **kwargs)
+    def update_snippet(*, session: Session, snippet: CustomizedSnippet, account_id: str, data: dict):
+        service_sessions.append(session)
+        event.listen(session, "after_commit", commits.append)
+        snippet.name = data["name"]
+        snippet.icon_info = data["icon_info"]
+        snippet.updated_by = account_id
+        snippet.updated_at = datetime.now(UTC).replace(tzinfo=None)
+        return snippet
 
     monkeypatch.setattr(snippets_module.SnippetService, "get_snippet_by_id", Mock(return_value=snippet))
-    monkeypatch.setattr(snippets_module.SnippetService, "update_snippet", update_snippet)
-    monkeypatch.setattr(snippets_module, "Session", SessionContext)
-    monkeypatch.setattr(snippets_module, "db", SimpleNamespace(engine=object()))
+    monkeypatch.setattr(snippets_module.SnippetService, "update_snippet", Mock(side_effect=update_snippet))
 
     api = snippets_module.CustomizedSnippetDetailApi()
     handler = unwrap(api.patch)
@@ -288,27 +335,40 @@ def test_patch_snippet_updates_and_commits(app: Flask, monkeypatch: pytest.Monke
     assert status_code == 200
     assert response["id"] == "snippet-1"
     assert response["name"] == "New"
-    update_snippet.assert_called_once()
-    assert update_snippet.call_args.kwargs["data"] == {
+    update_mock = snippets_module.SnippetService.update_snippet
+    update_mock.assert_called_once()
+    assert update_mock.call_args.kwargs["data"] == {
         "name": "New",
         "icon_info": {"icon": "star", "icon_background": None, "icon_type": None, "icon_url": None},
     }
-    session.commit.assert_called_once()
+    assert len(service_sessions) == 1
+    assert commits == service_sessions
+    assert isinstance(service_sessions[0], Session)
+    with Session(sqlite_engine) as verification_session:
+        persisted = verification_session.get(CustomizedSnippet, "snippet-1")
+    assert persisted is not None
+    assert persisted.name == "New"
+    assert persisted.updated_by == "account-1"
 
 
-def test_delete_snippet_deletes_and_commits(app: Flask, monkeypatch: pytest.MonkeyPatch):
-    snippet = _snippet()
-    session = SimpleNamespace(merge=Mock(return_value=snippet), commit=Mock())
-    delete_snippet = Mock()
+def test_delete_snippet_deletes_and_commits(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session, sqlite_engine: Engine
+):
+    snippet = _customized_snippet()
+    snippet_db.add(snippet)
+    snippet_db.commit()
+    snippet_db.expunge(snippet)
+    commits: list[Session] = []
+    service_sessions: list[Session] = []
 
-    class SessionContext(_SessionContext):
-        def __init__(self, engine, *args, **kwargs):
-            super().__init__(engine, *args, session=session, **kwargs)
+    def delete_snippet(*, session: Session, snippet: CustomizedSnippet) -> None:
+        service_sessions.append(session)
+        event.listen(session, "after_commit", commits.append)
+        session.delete(snippet)
 
     monkeypatch.setattr(snippets_module.SnippetService, "get_snippet_by_id", Mock(return_value=snippet))
-    monkeypatch.setattr(snippets_module.SnippetService, "delete_snippet", delete_snippet)
-    monkeypatch.setattr(snippets_module, "Session", SessionContext)
-    monkeypatch.setattr(snippets_module, "db", SimpleNamespace(engine=object()))
+    delete_mock = Mock(side_effect=delete_snippet)
+    monkeypatch.setattr(snippets_module.SnippetService, "delete_snippet", delete_mock)
 
     api = snippets_module.CustomizedSnippetDetailApi()
     handler = unwrap(api.delete)
@@ -318,27 +378,28 @@ def test_delete_snippet_deletes_and_commits(app: Flask, monkeypatch: pytest.Monk
 
     assert status_code == 204
     assert response == ""
-    delete_snippet.assert_called_once_with(session=session, snippet=snippet)
-    session.commit.assert_called_once()
+    delete_mock.assert_called_once()
+    assert isinstance(delete_mock.call_args.kwargs["session"], Session)
+    assert delete_mock.call_args.kwargs["snippet"].id == "snippet-1"
+    assert commits == service_sessions
+    with Session(sqlite_engine) as verification_session:
+        assert verification_session.get(CustomizedSnippet, "snippet-1") is None
 
 
-def test_export_snippet_returns_yaml_attachment(app: Flask, monkeypatch: pytest.MonkeyPatch):
-    snippet = _snippet(name="Snippet One")
+def test_export_snippet_returns_yaml_attachment(app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session):
+    snippet = _customized_snippet(name="Snippet One")
+    snippet_db.add(snippet)
+    snippet_db.commit()
+    snippet_db.expunge(snippet)
     export_snippet_dsl = Mock(return_value="version: 0.1.0\nkind: snippet\n")
-    session = SimpleNamespace()
+    dsl_sessions: list[Session] = []
 
-    class SessionContext(_SessionContext):
-        def __init__(self, engine, *args, **kwargs):
-            super().__init__(engine, *args, session=session, **kwargs)
+    def dsl_service(session: Session):
+        dsl_sessions.append(session)
+        return SimpleNamespace(export_snippet_dsl=export_snippet_dsl)
 
     monkeypatch.setattr(snippets_module.SnippetService, "get_snippet_by_id", Mock(return_value=snippet))
-    monkeypatch.setattr(
-        snippets_module,
-        "SnippetDslService",
-        Mock(return_value=SimpleNamespace(export_snippet_dsl=export_snippet_dsl)),
-    )
-    monkeypatch.setattr(snippets_module, "Session", SessionContext)
-    monkeypatch.setattr(snippets_module, "db", SimpleNamespace(engine=object()))
+    monkeypatch.setattr(snippets_module, "SnippetDslService", Mock(side_effect=dsl_service))
 
     api = snippets_module.CustomizedSnippetExportApi()
     handler = unwrap(api.get)
@@ -351,31 +412,25 @@ def test_export_snippet_returns_yaml_attachment(app: Flask, monkeypatch: pytest.
     assert response.headers["Content-Type"] == "application/x-yaml"
     assert "Snippet%20One.snippet" in response.headers["Content-Disposition"]
     export_snippet_dsl.assert_called_once_with(snippet=snippet, include_secret=True)
+    assert len(dsl_sessions) == 1
+    assert isinstance(dsl_sessions[0], Session)
 
 
-def test_import_snippet_returns_202_for_pending_confirmation(app: Flask, monkeypatch: pytest.MonkeyPatch):
+def test_import_snippet_returns_202_for_pending_confirmation(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session
+):
     user = _account("account-1")
     result = SnippetImportInfo(id="import-1", status=ImportStatus.PENDING, imported_dsl_version="999.0.0")
     import_snippet = Mock(return_value=result)
-    session = SimpleNamespace(commit=Mock())
+    commits: list[Session] = []
+    dsl_sessions: list[Session] = []
 
-    class _SessionContext:
-        def __init__(self, engine):
-            self.engine = engine
+    def dsl_service(session: Session):
+        dsl_sessions.append(session)
+        event.listen(session, "after_commit", commits.append)
+        return SimpleNamespace(import_snippet=import_snippet)
 
-        def __enter__(self):
-            return session
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(snippets_module, "Session", _SessionContext)
-    monkeypatch.setattr(snippets_module, "db", SimpleNamespace(engine=object()))
-    monkeypatch.setattr(
-        snippets_module,
-        "SnippetDslService",
-        Mock(return_value=SimpleNamespace(import_snippet=import_snippet)),
-    )
+    monkeypatch.setattr(snippets_module, "SnippetDslService", Mock(side_effect=dsl_service))
 
     api = snippets_module.CustomizedSnippetImportApi()
     handler = unwrap(api.post)
@@ -390,26 +445,24 @@ def test_import_snippet_returns_202_for_pending_confirmation(app: Flask, monkeyp
     assert status_code == 202
     assert response["status"] == ImportStatus.PENDING.value
     import_snippet.assert_called_once()
-    session.commit.assert_called_once()
+    assert len(dsl_sessions) == 1
+    assert isinstance(dsl_sessions[0], Session)
+    assert commits == dsl_sessions
 
 
-def test_import_snippet_returns_400_for_failed_import(app: Flask, monkeypatch: pytest.MonkeyPatch):
+def test_import_snippet_returns_400_for_failed_import(app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session):
     user = _account("account-1")
     result = SnippetImportInfo(id="import-1", status=ImportStatus.FAILED, error="Invalid DSL")
     import_snippet = Mock(return_value=result)
-    session = SimpleNamespace(commit=Mock())
+    commits: list[Session] = []
+    dsl_sessions: list[Session] = []
 
-    class SessionContext(_SessionContext):
-        def __init__(self, engine, *args, **kwargs):
-            super().__init__(engine, *args, session=session, **kwargs)
+    def dsl_service(session: Session):
+        dsl_sessions.append(session)
+        event.listen(session, "after_commit", commits.append)
+        return SimpleNamespace(import_snippet=import_snippet)
 
-    monkeypatch.setattr(snippets_module, "Session", SessionContext)
-    monkeypatch.setattr(snippets_module, "db", SimpleNamespace(engine=object()))
-    monkeypatch.setattr(
-        snippets_module,
-        "SnippetDslService",
-        Mock(return_value=SimpleNamespace(import_snippet=import_snippet)),
-    )
+    monkeypatch.setattr(snippets_module, "SnippetDslService", Mock(side_effect=dsl_service))
 
     api = snippets_module.CustomizedSnippetImportApi()
     handler = unwrap(api.post)
@@ -423,26 +476,25 @@ def test_import_snippet_returns_400_for_failed_import(app: Flask, monkeypatch: p
 
     assert status_code == 400
     assert response["error"] == "Invalid DSL"
-    session.commit.assert_called_once()
+    assert len(dsl_sessions) == 1
+    assert commits == dsl_sessions
 
 
-def test_import_confirm_returns_200_for_completed_import(app: Flask, monkeypatch: pytest.MonkeyPatch):
+def test_import_confirm_returns_200_for_completed_import(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session
+):
     user = _account("account-1")
     result = SnippetImportInfo(id="import-1", status=ImportStatus.COMPLETED, snippet_id="snippet-1")
     confirm_import = Mock(return_value=result)
-    session = SimpleNamespace(commit=Mock())
+    commits: list[Session] = []
+    dsl_sessions: list[Session] = []
 
-    class SessionContext(_SessionContext):
-        def __init__(self, engine, *args, **kwargs):
-            super().__init__(engine, *args, session=session, **kwargs)
+    def dsl_service(session: Session):
+        dsl_sessions.append(session)
+        event.listen(session, "after_commit", commits.append)
+        return SimpleNamespace(confirm_import=confirm_import)
 
-    monkeypatch.setattr(snippets_module, "Session", SessionContext)
-    monkeypatch.setattr(snippets_module, "db", SimpleNamespace(engine=object()))
-    monkeypatch.setattr(
-        snippets_module,
-        "SnippetDslService",
-        Mock(return_value=SimpleNamespace(confirm_import=confirm_import)),
-    )
+    monkeypatch.setattr(snippets_module, "SnippetDslService", Mock(side_effect=dsl_service))
 
     api = snippets_module.CustomizedSnippetImportConfirmApi()
     handler = unwrap(api.post)
@@ -456,7 +508,8 @@ def test_import_confirm_returns_200_for_completed_import(app: Flask, monkeypatch
     assert status_code == 200
     assert response["snippet_id"] == "snippet-1"
     confirm_import.assert_called_once_with(import_id="import-1", account=user)
-    session.commit.assert_called_once()
+    assert len(dsl_sessions) == 1
+    assert commits == dsl_sessions
 
 
 def test_check_dependencies_raises_when_snippet_missing(app: Flask, monkeypatch: pytest.MonkeyPatch):
@@ -470,23 +523,20 @@ def test_check_dependencies_raises_when_snippet_missing(app: Flask, monkeypatch:
             handler(api, "tenant-1", snippet_id="snippet-1")
 
 
-def test_check_dependencies_returns_dependency_result(app: Flask, monkeypatch: pytest.MonkeyPatch):
-    snippet = _snippet()
+def test_check_dependencies_returns_dependency_result(app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session):
+    snippet = _customized_snippet()
+    snippet_db.add(snippet)
+    snippet_db.commit()
+    snippet_db.expunge(snippet)
     check_dependencies = Mock(return_value=SimpleNamespace(model_dump=Mock(return_value={"leaked_dependencies": []})))
-    session = SimpleNamespace()
+    dsl_sessions: list[Session] = []
 
-    class SessionContext(_SessionContext):
-        def __init__(self, engine, *args, **kwargs):
-            super().__init__(engine, *args, session=session, **kwargs)
+    def dsl_service(session: Session):
+        dsl_sessions.append(session)
+        return SimpleNamespace(check_dependencies=check_dependencies)
 
     monkeypatch.setattr(snippets_module.SnippetService, "get_snippet_by_id", Mock(return_value=snippet))
-    monkeypatch.setattr(snippets_module, "Session", SessionContext)
-    monkeypatch.setattr(snippets_module, "db", SimpleNamespace(engine=object()))
-    monkeypatch.setattr(
-        snippets_module,
-        "SnippetDslService",
-        Mock(return_value=SimpleNamespace(check_dependencies=check_dependencies)),
-    )
+    monkeypatch.setattr(snippets_module, "SnippetDslService", Mock(side_effect=dsl_service))
 
     api = snippets_module.CustomizedSnippetCheckDependenciesApi()
     handler = unwrap(api.get)
@@ -497,6 +547,8 @@ def test_check_dependencies_returns_dependency_result(app: Flask, monkeypatch: p
     assert status_code == 200
     assert response == {"leaked_dependencies": []}
     check_dependencies.assert_called_once_with(snippet=snippet)
+    assert len(dsl_sessions) == 1
+    assert isinstance(dsl_sessions[0], Session)
 
 
 def test_increment_use_count_raises_when_snippet_missing(app: Flask, monkeypatch: pytest.MonkeyPatch):
@@ -513,26 +565,24 @@ def test_increment_use_count_raises_when_snippet_missing(app: Flask, monkeypatch
             handler(api, "tenant-1", snippet_id="snippet-1")
 
 
-def test_increment_use_count_returns_refreshed_count(app: Flask, monkeypatch: pytest.MonkeyPatch):
-    snippet = SimpleNamespace(id="snippet-1", tenant_id="tenant-1", use_count=2)
-    merged_snippet = SimpleNamespace(id="snippet-1", tenant_id="tenant-1", use_count=3)
-    session = SimpleNamespace(merge=Mock(return_value=merged_snippet), commit=Mock(), refresh=Mock())
+def test_increment_use_count_returns_refreshed_count(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session, sqlite_engine: Engine
+):
+    snippet = _customized_snippet(use_count=2)
+    snippet_db.add(snippet)
+    snippet_db.commit()
+    snippet_db.expunge(snippet)
+    commits: list[Session] = []
+    service_sessions: list[Session] = []
 
-    class _SessionContext:
-        def __init__(self, engine):
-            self.engine = engine
+    def increment_use_count(*, session: Session, snippet: CustomizedSnippet) -> None:
+        service_sessions.append(session)
+        event.listen(session, "after_commit", commits.append)
+        snippet.use_count += 1
 
-        def __enter__(self):
-            return session
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    increment_use_count = Mock()
+    increment_mock = Mock(side_effect=increment_use_count)
     monkeypatch.setattr(snippets_module.SnippetService, "get_snippet_by_id", Mock(return_value=snippet))
-    monkeypatch.setattr(snippets_module.SnippetService, "increment_use_count", increment_use_count)
-    monkeypatch.setattr(snippets_module, "Session", _SessionContext)
-    monkeypatch.setattr(snippets_module, "db", SimpleNamespace(engine=object()))
+    monkeypatch.setattr(snippets_module.SnippetService, "increment_use_count", increment_mock)
 
     api = snippets_module.CustomizedSnippetUseCountIncrementApi()
     handler = unwrap(api.post)
@@ -545,6 +595,10 @@ def test_increment_use_count_returns_refreshed_count(app: Flask, monkeypatch: py
 
     assert status_code == 200
     assert response == {"result": "success", "use_count": 3}
-    increment_use_count.assert_called_once_with(session=session, snippet=merged_snippet)
-    session.commit.assert_called_once()
-    session.refresh.assert_called_once_with(merged_snippet)
+    increment_mock.assert_called_once()
+    assert len(service_sessions) == 1
+    assert commits == service_sessions
+    with Session(sqlite_engine) as verification_session:
+        persisted = verification_session.get(CustomizedSnippet, "snippet-1")
+    assert persisted is not None
+    assert persisted.use_count == 3
