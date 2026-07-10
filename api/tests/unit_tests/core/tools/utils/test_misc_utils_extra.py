@@ -1,15 +1,22 @@
+"""SQLite-backed coverage for dataset retriever utilities and independent helpers."""
+
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from contextlib import nullcontext
+from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from yaml import YAMLError
 
 from core.app.app_config.entities import DatasetRetrieveConfigEntity
 from core.callback_handler.index_tool_callback_handler import DatasetIndexToolCallbackHandler
+from core.rag.index_processor.constant.index_type import IndexTechniqueType
 from core.rag.models.document import Document as RagDocument
 from core.tools.utils.dataset_retriever import dataset_multi_retriever_tool as multi_retriever_module
 from core.tools.utils.dataset_retriever import dataset_retriever_tool as single_retriever_module
@@ -18,6 +25,9 @@ from core.tools.utils.dataset_retriever.dataset_retriever_tool import DatasetRet
 from core.tools.utils.text_processing_utils import remove_leading_symbols
 from core.tools.utils.uuid_utils import is_valid_uuid
 from core.tools.utils.yaml_utils import _load_yaml_file, load_yaml_file_cached
+from models.base import TypeBase
+from models.dataset import Dataset, Document, DocumentSegment
+from models.enums import DataSourceType, DocumentCreatedFrom, SegmentStatus
 
 
 def _retrieve_config() -> DatasetRetrieveConfigEntity:
@@ -56,6 +66,107 @@ class _TestHitCallback(DatasetIndexToolCallbackHandler):
 
     def return_retriever_resource_info(self, resource):
         self.resources = list(resource)
+
+
+@pytest.fixture
+def orm_session(sqlite_engine: Engine) -> Iterator[Session]:
+    """Provide persisted dataset state through a caller-owned SQLAlchemy session."""
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[Dataset.__table__, Document.__table__, DocumentSegment.__table__],
+    )
+    with Session(sqlite_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture
+def bind_retriever_db_sessions(
+    monkeypatch: pytest.MonkeyPatch, sqlite_engine: Engine
+) -> Iterator[scoped_session[Session]]:
+    """Bind both retriever modules' Flask-style session proxy to SQLite."""
+    session_proxy = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    monkeypatch.setattr(single_retriever_module, "db", SimpleNamespace(session=session_proxy))
+    monkeypatch.setattr(multi_retriever_module, "db", SimpleNamespace(session=session_proxy))
+    try:
+        yield session_proxy
+    finally:
+        session_proxy.remove()
+
+
+def _dataset(
+    *,
+    dataset_id: str = "dataset-1",
+    tenant_id: str = "tenant-1",
+    name: str = "Knowledge Base",
+    provider: str = "vendor",
+    retrieval_model: dict | None = None,
+) -> Dataset:
+    return Dataset(
+        id=dataset_id,
+        tenant_id=tenant_id,
+        name=name,
+        provider=provider,
+        data_source_type=DataSourceType.UPLOAD_FILE,
+        indexing_technique=IndexTechniqueType.HIGH_QUALITY,
+        retrieval_model=retrieval_model,
+        created_by="creator",
+    )
+
+
+def _document(
+    *,
+    document_id: str,
+    dataset_id: str,
+    tenant_id: str = "tenant-1",
+    name: str,
+    data_source_type: DataSourceType,
+    metadata: dict,
+) -> Document:
+    return Document(
+        id=document_id,
+        tenant_id=tenant_id,
+        dataset_id=dataset_id,
+        position=1,
+        data_source_type=data_source_type,
+        batch="batch-1",
+        name=name,
+        created_from=DocumentCreatedFrom.WEB,
+        created_by="creator",
+        doc_metadata=metadata,
+    )
+
+
+def _segment(
+    *,
+    segment_id: str,
+    dataset_id: str,
+    document_id: str,
+    index_node_id: str,
+    content: str,
+    answer: str | None,
+    hit_count: int,
+    word_count: int,
+    position: int,
+    index_node_hash: str,
+) -> DocumentSegment:
+    segment = DocumentSegment(
+        tenant_id="tenant-1",
+        dataset_id=dataset_id,
+        document_id=document_id,
+        position=position,
+        content=content,
+        word_count=word_count,
+        tokens=word_count,
+        created_by="creator",
+        index_node_id=index_node_id,
+        index_node_hash=index_node_hash,
+        answer=answer,
+        hit_count=hit_count,
+        status=SegmentStatus.COMPLETED,
+        completed_at=datetime.now(),
+    )
+    segment.id = segment_id
+    return segment
 
 
 def test_remove_leading_symbols_preserves_markdown_link_and_strips_punctuation():
@@ -105,8 +216,10 @@ def test_load_yaml_file_cached_hits(tmp_path):
     assert load_yaml_file_cached.cache_info().hits == 1
 
 
-def test_single_dataset_retriever_from_dataset_builds_name_and_description():
-    dataset = SimpleNamespace(id="dataset-1", tenant_id="tenant-1", name="Knowledge", description=None)
+def test_single_dataset_retriever_from_dataset_builds_name_and_description(orm_session: Session) -> None:
+    dataset = _dataset(name="Knowledge")
+    orm_session.add(dataset)
+    orm_session.commit()
 
     tool = SingleDatasetRetrieverTool.from_dataset(
         dataset=dataset,
@@ -120,23 +233,18 @@ def test_single_dataset_retriever_from_dataset_builds_name_and_description():
     assert tool.description == "useful for when you want to answer queries about the Knowledge"
 
 
-def test_single_dataset_retriever_external_run_returns_content_and_resources():
-    dataset = SimpleNamespace(
-        id="dataset-1",
-        tenant_id="tenant-1",
-        name="Knowledge Base",
-        provider="external",
-        indexing_technique="high_quality",
-        retrieval_model={},
-    )
+def test_single_dataset_retriever_external_run_returns_content_and_resources(
+    orm_session: Session, bind_retriever_db_sessions: scoped_session[Session]
+) -> None:
+    dataset = _dataset(provider="external", retrieval_model={})
+    orm_session.add(dataset)
+    orm_session.commit()
     callback = _TestHitCallback()
     dataset_retrieval = Mock()
     dataset_retrieval.get_metadata_filter_condition.return_value = (
         {"dataset-1": ["doc-a"]},
         {"logical_operator": "and"},
     )
-    db_session = Mock()
-    db_session.scalar.return_value = dataset
     external_documents = [
         {"content": "first", "metadata": {"document_id": "doc-a"}, "score": 0.9, "title": "Doc A"},
         {"content": "second", "metadata": {"document_id": "doc-b"}, "score": 0.8, "title": "Doc B"},
@@ -152,14 +260,13 @@ def test_single_dataset_retriever_external_run_returns_content_and_resources():
         inputs={"x": 1},
     )
 
-    with patch.object(single_retriever_module, "db", SimpleNamespace(session=db_session)):
-        with patch.object(single_retriever_module, "DatasetRetrieval", return_value=dataset_retrieval):
-            with patch.object(
-                single_retriever_module.ExternalDatasetService,
-                "fetch_external_knowledge_retrieval",
-                return_value=external_documents,
-            ) as fetch_mock:
-                result = tool.run(session=MagicMock(), query="hello")
+    with patch.object(single_retriever_module, "DatasetRetrieval", return_value=dataset_retrieval):
+        with patch.object(
+            single_retriever_module.ExternalDatasetService,
+            "fetch_external_knowledge_retrieval",
+            return_value=external_documents,
+        ) as fetch_mock:
+            result = tool.run(session=orm_session, query="hello")
 
     assert result == "first\nsecond"
     assert callback.queries == [("hello", "dataset-1")]
@@ -168,22 +275,17 @@ def test_single_dataset_retriever_external_run_returns_content_and_resources():
     assert [item.position for item in resource_info] == [1, 2]
     assert resource_info[0].dataset_id == "dataset-1"
     fetch_mock.assert_called_once()
+    assert fetch_mock.call_args.kwargs["session"] is orm_session
 
 
-def test_single_dataset_retriever_returns_empty_when_metadata_filter_finds_no_documents():
-    dataset = SimpleNamespace(
-        id="dataset-1",
-        tenant_id="tenant-1",
-        name="Knowledge Base",
-        provider="internal",
-        indexing_technique="high_quality",
-        retrieval_model=None,
-    )
+def test_single_dataset_retriever_returns_empty_when_metadata_filter_finds_no_documents(
+    orm_session: Session, bind_retriever_db_sessions: scoped_session[Session]
+) -> None:
+    dataset = _dataset()
+    orm_session.add(dataset)
+    orm_session.commit()
     dataset_retrieval = Mock()
     dataset_retrieval.get_metadata_filter_condition.return_value = ({"dataset-1": []}, {"logical_operator": "and"})
-    db_session = Mock()
-    db_session.scalar.return_value = dataset
-
     tool = SingleDatasetRetrieverTool(
         tenant_id="tenant-1",
         dataset_id="dataset-1",
@@ -194,22 +296,18 @@ def test_single_dataset_retriever_returns_empty_when_metadata_filter_finds_no_do
         inputs={},
     )
 
-    with patch.object(single_retriever_module, "db", SimpleNamespace(session=db_session)):
-        with patch.object(single_retriever_module, "DatasetRetrieval", return_value=dataset_retrieval):
-            with patch.object(single_retriever_module.RetrievalService, "retrieve") as retrieve_mock:
-                result = tool.run(session=MagicMock(), query="hello")
+    with patch.object(single_retriever_module, "DatasetRetrieval", return_value=dataset_retrieval):
+        with patch.object(single_retriever_module.RetrievalService, "retrieve") as retrieve_mock:
+            result = tool.run(session=orm_session, query="hello")
 
     assert result == ""
     retrieve_mock.assert_not_called()
 
 
-def test_single_dataset_retriever_non_economy_run_sorts_context_and_resources():
-    dataset = SimpleNamespace(
-        id="dataset-1",
-        tenant_id="tenant-1",
-        name="Knowledge Base",
-        provider="internal",
-        indexing_technique="high_quality",
+def test_single_dataset_retriever_non_economy_run_sorts_context_and_resources(
+    orm_session: Session, bind_retriever_db_sessions: scoped_session[Session]
+) -> None:
+    dataset = _dataset(
         retrieval_model={
             "search_method": "semantic_search",
             "score_threshold_enabled": True,
@@ -223,30 +321,46 @@ def test_single_dataset_retriever_non_economy_run_sorts_context_and_resources():
     callback = _TestHitCallback()
     dataset_retrieval = Mock()
     dataset_retrieval.get_metadata_filter_condition.return_value = (None, None)
-    low_segment = SimpleNamespace(
-        id="seg-low",
-        dataset_id="dataset-1",
+    low_document = _document(
         document_id="doc-low",
+        dataset_id=dataset.id,
+        name="Document Low",
+        data_source_type=DataSourceType.UPLOAD_FILE,
+        metadata={"lang": "en"},
+    )
+    high_document = _document(
+        document_id="doc-high",
+        dataset_id=dataset.id,
+        name="Document High",
+        data_source_type=DataSourceType.NOTION_IMPORT,
+        metadata={"lang": "fr"},
+    )
+    low_segment = _segment(
+        segment_id="seg-low",
+        dataset_id=dataset.id,
+        document_id=low_document.id,
+        index_node_id="node-low",
         content="raw low",
         answer="low answer",
         hit_count=1,
         word_count=10,
         position=3,
         index_node_hash="hash-low",
-        get_sign_content=lambda: "signed low",
     )
-    high_segment = SimpleNamespace(
-        id="seg-high",
-        dataset_id="dataset-1",
-        document_id="doc-high",
+    high_segment = _segment(
+        segment_id="seg-high",
+        dataset_id=dataset.id,
+        document_id=high_document.id,
+        index_node_id="node-high",
         content="raw high",
         answer=None,
         hit_count=9,
         word_count=25,
         position=1,
         index_node_hash="hash-high",
-        get_sign_content=lambda: "signed high",
     )
+    orm_session.add_all([dataset, low_document, high_document, low_segment, high_segment])
+    orm_session.commit()
     records = [
         SimpleNamespace(segment=low_segment, score=0.2, summary="summary low"),
         SimpleNamespace(segment=high_segment, score=0.9, summary=None),
@@ -255,16 +369,6 @@ def test_single_dataset_retriever_non_economy_run_sorts_context_and_resources():
         RagDocument(page_content="first", metadata={"doc_id": "node-low", "score": 0.2}),
         RagDocument(page_content="second", metadata={"doc_id": "node-high", "score": 0.9}),
     ]
-    lookup_doc_low = SimpleNamespace(
-        id="doc-low", name="Document Low", data_source_type="upload_file", doc_metadata={"lang": "en"}
-    )
-    lookup_doc_high = SimpleNamespace(
-        id="doc-high", name="Document High", data_source_type="notion", doc_metadata={"lang": "fr"}
-    )
-    db_session = Mock()
-    db_session.scalar.side_effect = [dataset, lookup_doc_low, lookup_doc_high]
-    db_session.get.return_value = dataset
-
     tool = SingleDatasetRetrieverTool(
         tenant_id="tenant-1",
         dataset_id="dataset-1",
@@ -276,17 +380,16 @@ def test_single_dataset_retriever_non_economy_run_sorts_context_and_resources():
         top_k=2,
     )
 
-    with patch.object(single_retriever_module, "db", SimpleNamespace(session=db_session)):
-        with patch.object(single_retriever_module, "DatasetRetrieval", return_value=dataset_retrieval):
-            with patch.object(single_retriever_module.RetrievalService, "retrieve", return_value=documents):
-                with patch.object(
-                    single_retriever_module.RetrievalService,
-                    "format_retrieval_documents",
-                    return_value=records,
-                ):
-                    result = tool.run(session=MagicMock(), query="hello")
+    with patch.object(single_retriever_module, "DatasetRetrieval", return_value=dataset_retrieval):
+        with patch.object(single_retriever_module.RetrievalService, "retrieve", return_value=documents):
+            with patch.object(
+                single_retriever_module.RetrievalService,
+                "format_retrieval_documents",
+                return_value=records,
+            ):
+                result = tool.run(session=orm_session, query="hello")
 
-    assert result == "signed high\nsummary low\nquestion:signed low answer:low answer"
+    assert result == "raw high\nsummary low\nquestion:raw low answer:low answer"
     assert callback.documents == documents
     assert callback.resources is not None
     resource_info = callback.resources
@@ -310,11 +413,13 @@ def test_multi_dataset_retriever_from_dataset_sets_tool_name():
     assert tool.name == "dataset_tenant_1"
 
 
-def test_multi_dataset_retriever_retriever_returns_early_when_dataset_is_missing():
+def test_multi_dataset_retriever_retriever_returns_early_when_dataset_is_missing(
+    orm_session: Session, bind_retriever_db_sessions: scoped_session[Session]
+) -> None:
     callback = _TestHitCallback()
     all_documents: list[RagDocument] = []
-    db_session = Mock()
-    db_session.scalar.return_value = None
+    orm_session.add(_dataset(tenant_id="tenant-2"))
+    orm_session.commit()
     tool = DatasetMultiRetrieverTool(
         tenant_id="tenant-1",
         dataset_ids=["dataset-1"],
@@ -324,15 +429,14 @@ def test_multi_dataset_retriever_retriever_returns_early_when_dataset_is_missing
         retriever_from="prod",
     )
 
-    with patch.object(multi_retriever_module, "db", SimpleNamespace(session=db_session)):
-        with patch.object(multi_retriever_module.RetrievalService, "retrieve") as retrieve_mock:
-            result = tool._retriever(
-                flask_app=_FakeFlaskApp(),
-                dataset_id="dataset-1",
-                query="hello",
-                all_documents=all_documents,
-                hit_callbacks=[callback],
-            )
+    with patch.object(multi_retriever_module.RetrievalService, "retrieve") as retrieve_mock:
+        result = tool._retriever(
+            flask_app=_FakeFlaskApp(),
+            dataset_id="dataset-1",
+            query="hello",
+            all_documents=all_documents,
+            hit_callbacks=[callback],
+        )
 
     assert result == []
     assert all_documents == []
@@ -340,11 +444,10 @@ def test_multi_dataset_retriever_retriever_returns_early_when_dataset_is_missing
     retrieve_mock.assert_not_called()
 
 
-def test_multi_dataset_retriever_retriever_non_economy_uses_retrieval_model():
-    dataset = SimpleNamespace(
-        id="dataset-1",
-        tenant_id="tenant-1",
-        indexing_technique="high_quality",
+def test_multi_dataset_retriever_retriever_non_economy_uses_retrieval_model(
+    orm_session: Session, bind_retriever_db_sessions: scoped_session[Session]
+) -> None:
+    dataset = _dataset(
         retrieval_model={
             "search_method": "semantic_search",
             "top_k": 6,
@@ -358,8 +461,8 @@ def test_multi_dataset_retriever_retriever_non_economy_uses_retrieval_model():
     callback = _TestHitCallback()
     documents = [RagDocument(page_content="retrieved", metadata={"doc_id": "node-1", "score": 0.4})]
     all_documents: list[RagDocument] = []
-    db_session = Mock()
-    db_session.scalar.return_value = dataset
+    orm_session.add(dataset)
+    orm_session.commit()
     tool = DatasetMultiRetrieverTool(
         tenant_id="tenant-1",
         dataset_ids=["dataset-1"],
@@ -370,15 +473,14 @@ def test_multi_dataset_retriever_retriever_non_economy_uses_retrieval_model():
         top_k=2,
     )
 
-    with patch.object(multi_retriever_module, "db", SimpleNamespace(session=db_session)):
-        with patch.object(multi_retriever_module.RetrievalService, "retrieve", return_value=documents) as retrieve_mock:
-            tool._retriever(
-                flask_app=_FakeFlaskApp(),
-                dataset_id="dataset-1",
-                query="hello",
-                all_documents=all_documents,
-                hit_callbacks=[callback],
-            )
+    with patch.object(multi_retriever_module.RetrievalService, "retrieve", return_value=documents) as retrieve_mock:
+        tool._retriever(
+            flask_app=_FakeFlaskApp(),
+            dataset_id="dataset-1",
+            query="hello",
+            all_documents=all_documents,
+            hit_callbacks=[callback],
+        )
 
     assert all_documents == documents
     assert callback.queries == [("hello", "dataset-1")]
@@ -394,7 +496,9 @@ def test_multi_dataset_retriever_retriever_non_economy_uses_retrieval_model():
     )
 
 
-def test_multi_dataset_retriever_run_orders_segments_and_returns_resources():
+def test_multi_dataset_retriever_run_orders_segments_and_returns_resources(
+    orm_session: Session, bind_retriever_db_sessions: scoped_session[Session]
+) -> None:
     callback = _TestHitCallback()
     tool = DatasetMultiRetrieverTool(
         tenant_id="tenant-1",
@@ -416,10 +520,26 @@ def test_multi_dataset_retriever_run_orders_segments_and_returns_resources():
         else:
             kwargs["all_documents"].append(second_doc)
 
-    segment_for_node_2 = SimpleNamespace(
-        id="seg-2",
-        dataset_id="dataset-1",
+    dataset_one = _dataset(dataset_id="dataset-1", name="Dataset One")
+    dataset_two = _dataset(dataset_id="dataset-2", name="Dataset Two")
+    document_one = _document(
+        document_id="doc-1",
+        dataset_id=dataset_two.id,
+        name="Doc One",
+        data_source_type=DataSourceType.UPLOAD_FILE,
+        metadata={"p": 1},
+    )
+    document_two = _document(
         document_id="doc-2",
+        dataset_id=dataset_one.id,
+        name="Doc Two",
+        data_source_type=DataSourceType.NOTION_IMPORT,
+        metadata={"p": 2},
+    )
+    segment_for_node_2 = _segment(
+        segment_id="seg-2",
+        dataset_id=dataset_one.id,
+        document_id=document_two.id,
         index_node_id="node-2",
         content="raw two",
         answer="answer two",
@@ -427,12 +547,11 @@ def test_multi_dataset_retriever_run_orders_segments_and_returns_resources():
         word_count=20,
         position=2,
         index_node_hash="hash-2",
-        get_sign_content=lambda: "signed two",
     )
-    segment_for_node_1 = SimpleNamespace(
-        id="seg-1",
-        dataset_id="dataset-2",
-        document_id="doc-1",
+    segment_for_node_1 = _segment(
+        segment_id="seg-1",
+        dataset_id=dataset_two.id,
+        document_id=document_one.id,
         index_node_id="node-1",
         content="raw one",
         answer=None,
@@ -440,18 +559,9 @@ def test_multi_dataset_retriever_run_orders_segments_and_returns_resources():
         word_count=30,
         position=1,
         index_node_hash="hash-1",
-        get_sign_content=lambda: "signed one",
     )
-    db_session = Mock()
-    db_session.scalars.return_value.all.return_value = [segment_for_node_2, segment_for_node_1]
-    db_session.get.side_effect = [
-        SimpleNamespace(id="dataset-2", name="Dataset Two"),
-        SimpleNamespace(id="dataset-1", name="Dataset One"),
-    ]
-    db_session.scalar.side_effect = [
-        SimpleNamespace(id="doc-1", name="Doc One", data_source_type="upload_file", doc_metadata={"p": 1}),
-        SimpleNamespace(id="doc-2", name="Doc Two", data_source_type="notion", doc_metadata={"p": 2}),
-    ]
+    orm_session.add_all([dataset_one, dataset_two, document_one, document_two, segment_for_node_2, segment_for_node_1])
+    orm_session.commit()
     model_manager = Mock()
     model_manager.get_model_instance.return_value = Mock()
     rerank_runner = Mock()
@@ -463,15 +573,16 @@ def test_multi_dataset_retriever_run_orders_segments_and_returns_resources():
             with patch.object(multi_retriever_module.threading, "Thread", _ImmediateThread):
                 with patch.object(multi_retriever_module, "ModelManager", return_value=model_manager):
                     with patch.object(multi_retriever_module, "RerankModelRunner", return_value=rerank_runner):
-                        with patch.object(multi_retriever_module, "db", SimpleNamespace(session=db_session)):
-                            result = tool.run(session=MagicMock(), query="hello")
+                        result = tool.run(session=orm_session, query="hello")
 
-    assert result == "signed one\nquestion:signed two answer:answer two"
+    assert result == "raw one\nquestion:raw two answer:answer two"
     assert retriever_mock.call_count == 2
     assert callback.documents == [second_doc, first_doc]
     assert callback.resources is not None
     resource_info = callback.resources
     assert [item.position for item in resource_info] == [1, 2]
+    assert [item.dataset_id for item in resource_info] == ["dataset-2", "dataset-1"]
+    assert [item.document_id for item in resource_info] == ["doc-1", "doc-2"]
     assert resource_info[0].score == 0.9
     assert resource_info[0].content == "raw one"
     assert resource_info[1].score == 0.4
