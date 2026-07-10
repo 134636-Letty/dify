@@ -1,10 +1,64 @@
+from collections.abc import Iterator
+from datetime import datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
-from pytest_mock import MockerFixture
+import pytest
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
+import core.prompt.utils.get_thread_messages_length as length_module
 from constants import UUID_NIL
 from core.prompt.utils.extract_thread_messages import extract_thread_messages
 from core.prompt.utils.get_thread_messages_length import get_thread_messages_length
+from models.enums import ConversationFromSource
+from models.model import Message
+
+
+class _DatabaseBinding:
+    """Expose the real SQLite session used by conversation message queries."""
+
+    session: Session
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+
+@pytest.fixture
+def message_session(sqlite_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[Session]:
+    """Create only the legacy Message table and bind its scoped query."""
+
+    Message.__table__.create(sqlite_engine)
+    with Session(sqlite_engine, expire_on_commit=False) as session:
+        monkeypatch.setattr(length_module, "db", _DatabaseBinding(session))
+        yield session
+
+
+def _persisted_message(
+    *,
+    message_id: str,
+    conversation_id: str,
+    parent_message_id: str,
+    answer: str,
+    created_at: datetime,
+) -> Message:
+    message = Message(
+        id=message_id,
+        app_id="app-id",
+        conversation_id=conversation_id,
+        query="question",
+        message={"role": "user", "content": "question"},
+        answer=answer,
+        message_unit_price=Decimal("0.0001"),
+        answer_unit_price=Decimal("0.0001"),
+        currency="USD",
+        from_source=ConversationFromSource.API,
+        parent_message_id=parent_message_id,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    message._inputs = {}
+    return message
 
 
 class MockMessage:
@@ -105,31 +159,61 @@ def test_extract_thread_messages_breaks_when_parent_is_none():
     assert result[0].id == id2
 
 
-def test_get_thread_messages_length_excludes_newly_created_empty_answer(mocker: MockerFixture):
+def test_get_thread_messages_length_excludes_newly_created_empty_answer(message_session: Session):
     id1, id2 = str(uuid4()), str(uuid4())
+    now = datetime.now()
     messages = [
-        MockMessage(id2, id1, answer=""),  # newest generated message should be excluded
-        MockMessage(id1, UUID_NIL, answer="ok"),
+        _persisted_message(
+            message_id=id2,
+            conversation_id="conversation-1",
+            parent_message_id=id1,
+            answer="",
+            created_at=now,
+        ),
+        _persisted_message(
+            message_id=id1,
+            conversation_id="conversation-1",
+            parent_message_id=UUID_NIL,
+            answer="ok",
+            created_at=now - timedelta(seconds=1),
+        ),
+        _persisted_message(
+            message_id=str(uuid4()),
+            conversation_id="other-conversation",
+            parent_message_id=UUID_NIL,
+            answer="unrelated",
+            created_at=now + timedelta(seconds=1),
+        ),
     ]
-
-    mock_scalars = mocker.patch("core.prompt.utils.get_thread_messages_length.db.session.scalars")
-    mock_scalars.return_value.all.return_value = messages
+    message_session.add_all(messages)
+    message_session.commit()
 
     length = get_thread_messages_length("conversation-1")
 
     assert length == 1
-    mock_scalars.assert_called_once()
 
 
-def test_get_thread_messages_length_keeps_non_empty_latest_answer(mocker: MockerFixture):
+def test_get_thread_messages_length_keeps_non_empty_latest_answer(message_session: Session):
     id1, id2 = str(uuid4()), str(uuid4())
+    now = datetime.now()
     messages = [
-        MockMessage(id2, id1, answer="latest-answer"),
-        MockMessage(id1, UUID_NIL, answer="older-answer"),
+        _persisted_message(
+            message_id=id2,
+            conversation_id="conversation-2",
+            parent_message_id=id1,
+            answer="latest-answer",
+            created_at=now,
+        ),
+        _persisted_message(
+            message_id=id1,
+            conversation_id="conversation-2",
+            parent_message_id=UUID_NIL,
+            answer="older-answer",
+            created_at=now - timedelta(seconds=1),
+        ),
     ]
-
-    mock_scalars = mocker.patch("core.prompt.utils.get_thread_messages_length.db.session.scalars")
-    mock_scalars.return_value.all.return_value = messages
+    message_session.add_all(messages)
+    message_session.commit()
 
     length = get_thread_messages_length("conversation-2")
 
