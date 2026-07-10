@@ -101,6 +101,7 @@ from .model import (
     UploadFile,
 )
 from .oauth import DatasourceOauthParamConfig, DatasourceProvider, OAuthAccessToken
+from .ldap_setting import LdapSetting
 from .provider import (
     LoadBalancingModelConfig,
     Provider,
@@ -230,6 +231,7 @@ __all__ = [
     "MessageChain",
     "MessageFeedback",
     "MessageFile",
+    "LdapSetting",
     "OAuthAccessToken",
     "OperationLog",
     "PermissionEnum",

@@ -26,6 +26,8 @@ import ModelProviderPage from './model-provider-page'
 import { useResetModelProviderListExpanded } from './model-provider-page/atoms'
 import PermissionsPage from './permissions-page'
 import PreferencePage from './preference-page'
+import LdapPage from './ldap-page'
+import { isCurrentWorkspaceOwnerAtom } from '@/context/workspace-state'
 
 const iconClassName = `
   w-4 h-4 mr-2
@@ -56,6 +58,7 @@ export default function AccountSetting({
   const { enableBilling, enableReplaceWebAppLogo } = useProviderContext()
   const { data: systemFeatures } = useSuspenseQuery(systemFeaturesQueryOptions())
   const workspacePermissionKeys = useAtomValue(workspacePermissionKeysAtom)
+  const isCurrentWorkspaceOwner = useAtomValue(isCurrentWorkspaceOwnerAtom)
   const isRbacEnabled = systemFeatures.rbac_enabled
   const canManageWorkspaceRoles = isRbacEnabled && hasPermission(workspacePermissionKeys, 'workspace.role.manage')
   const canViewBilling = enableBilling && hasPermission(workspacePermissionKeys, BillingPermission.View)
@@ -122,6 +125,12 @@ export default function AccountSetting({
       activeIcon: <span className={cn('i-ri-color-filter-fill', iconClassName)} />,
     },
     {
+      key: ACCOUNT_SETTING_TAB.LDAP,
+      name: 'LDAP / AD Settings',
+      icon: <span className={cn('i-ri-shield-keyhole-line', iconClassName)} />,
+      activeIcon: <span className={cn('i-ri-shield-keyhole-fill', iconClassName)} />,
+    },
+    {
       key: ACCOUNT_SETTING_TAB.PREFERENCES,
       name: t($ => $['settings.preferences'], { ns: 'common' }),
       title: t($ => $['account.general'], { ns: 'common' }),
@@ -146,6 +155,10 @@ export default function AccountSetting({
 
     if (enableReplaceWebAppLogo || enableBilling)
       visibleTabs.push(ACCOUNT_SETTING_TAB.CUSTOM)
+
+    const canManageMembers = hasPermission(workspacePermissionKeys, 'workspace.member.manage')
+    if (isCurrentWorkspaceOwner || canManageMembers)
+      visibleTabs.push(ACCOUNT_SETTING_TAB.LDAP)
 
     return visibleTabs
       .map(tab => settingItems.find(item => item.key === tab))
@@ -270,6 +283,7 @@ export default function AccountSetting({
               {activeMenu === ACCOUNT_SETTING_TAB.API_BASED_EXTENSION && <ApiBasedExtensionPage />}
               {activeMenu === ACCOUNT_SETTING_TAB.CUSTOM && <CustomPage />}
               {activeMenu === ACCOUNT_SETTING_TAB.PREFERENCES && <PreferencePage />}
+              {activeMenu === ACCOUNT_SETTING_TAB.LDAP && <LdapPage />}
             </div>
           </ScrollArea>
         </div>

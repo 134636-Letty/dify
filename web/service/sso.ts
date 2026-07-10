@@ -1,4 +1,4 @@
-import { get } from './base'
+import { get, post } from './base'
 
 export const getUserSAMLSSOUrl = (invite_token?: string) => {
   const url = invite_token ? `/enterprise/sso/saml/login?invite_token=${invite_token}` : '/enterprise/sso/saml/login'
@@ -14,3 +14,16 @@ export const getUserOAuth2SSOUrl = (invite_token?: string) => {
   const url = invite_token ? `/enterprise/sso/oauth2/login?invite_token=${invite_token}` : '/enterprise/sso/oauth2/login'
   return get<{ url: string, state: string }>(url)
 }
+
+export const getLDAPSettings = () => {
+  return get<any>('/admin/ldap-settings')
+}
+
+export const saveLDAPSettings = (body: any) => {
+  return post<any>('/admin/ldap-settings', { body })
+}
+
+export const testLDAPConnection = (body: any) => {
+  return post<any>('/admin/ldap-settings/test', { body })
+}
+
