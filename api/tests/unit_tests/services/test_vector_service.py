@@ -1,709 +1,438 @@
-"""Unit tests for `api/services/vector_service.py`."""
+"""SQLite-backed tests for :mod:`services.vector_service`."""
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
-from unittest.mock import MagicMock
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+from sqlalchemy import Engine, event, select
+from sqlalchemy.orm import Session
 
-import services.vector_service as vector_service_module
+import models.dataset as dataset_module
+import services.vector_service as vector_module
 from core.rag.index_processor.constant.index_type import IndexStructureType, IndexTechniqueType
+from extensions.storage.storage_type import StorageType
+from models.base import TypeBase
+from models.dataset import (
+    ChildChunk,
+    Dataset,
+    DatasetProcessRule,
+    Document,
+    DocumentSegment,
+    SegmentAttachmentBinding,
+)
+from models.enums import CreatorUserRole, DataSourceType, DocumentCreatedFrom, ProcessRuleMode, SegmentStatus
+from models.model import UploadFile
 from services.vector_service import VectorService
 
 
 @dataclass(frozen=True)
-class _UploadFileStub:
-    id: str
-    name: str
+class Rows:
+    dataset: Dataset
+    document: Document
+    rule: DatasetProcessRule
+    segment: DocumentSegment
 
 
-@dataclass(frozen=True)
-class _ChildDocStub:
-    page_content: str
-    metadata: dict[str, Any]
+@pytest.fixture
+def orm_session(sqlite_engine: Engine) -> Iterator[Session]:
+    models = (Dataset, Document, DatasetProcessRule, DocumentSegment, ChildChunk, UploadFile, SegmentAttachmentBinding)
+    TypeBase.metadata.create_all(sqlite_engine, tables=[model.__table__ for model in models])
+    with Session(sqlite_engine, expire_on_commit=False) as session:
+        yield session
 
 
-@dataclass
-class _ParentDocStub:
-    children: list[_ChildDocStub]
-
-
-def _make_dataset(
-    *,
-    indexing_technique: str = IndexTechniqueType.HIGH_QUALITY,
-    doc_form: str = IndexStructureType.PARAGRAPH_INDEX,
-    tenant_id: str = "tenant-1",
-    dataset_id: str = "dataset-1",
-    is_multimodal: bool = False,
-    embedding_model_provider: str | None = "openai",
-    embedding_model: str = "text-embedding",
-) -> MagicMock:
-    dataset = MagicMock(name="dataset")
-    dataset.id = dataset_id
-    dataset.tenant_id = tenant_id
-    dataset.doc_form = doc_form
-    dataset.indexing_technique = indexing_technique
-    dataset.is_multimodal = is_multimodal
-    dataset.embedding_model_provider = embedding_model_provider
-    dataset.embedding_model = embedding_model
-    return dataset
-
-
-def _make_segment(
-    *,
-    segment_id: str = "seg-1",
-    tenant_id: str = "tenant-1",
-    dataset_id: str = "dataset-1",
-    document_id: str = "doc-1",
-    content: str = "hello",
-    index_node_id: str = "node-1",
-    index_node_hash: str = "hash-1",
-    attachments: list[dict[str, str]] | None = None,
-) -> MagicMock:
-    segment = MagicMock(name="segment")
-    segment.id = segment_id
-    segment.tenant_id = tenant_id
-    segment.dataset_id = dataset_id
-    segment.document_id = document_id
-    segment.content = content
-    segment.index_node_id = index_node_id
-    segment.index_node_hash = index_node_hash
-    segment.attachments = attachments or []
-    return segment
-
-
-def _mock_db_session_for_update_multimodel(*, upload_files: list[_UploadFileStub] | None) -> MagicMock:
-    session = MagicMock(name="session")
-
-    # db.session.execute() is used for delete(SegmentAttachmentBinding).where(...)
-    session.execute = MagicMock(name="execute")
-
-    # db.session.scalars(select(UploadFile).where(...)).all() returns upload files
-    session.scalars.return_value.all.return_value = upload_files or []
-
-    db_mock = MagicMock(name="db")
-    db_mock.session = session
-    return db_mock
-
-
-def test_create_segments_vector_regular_indexing_loads_documents_and_keywords(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(is_multimodal=False)
-    segment = _make_segment()
-
-    index_processor = MagicMock(name="index_processor")
-    factory_instance = MagicMock(name="IndexProcessorFactory-instance")
-    factory_instance.init_index_processor.return_value = index_processor
-    monkeypatch.setattr(vector_service_module, "IndexProcessorFactory", MagicMock(return_value=factory_instance))
-
-    VectorService.create_segments_vector([["k1"]], [segment], dataset, IndexStructureType.PARAGRAPH_INDEX, MagicMock())
-
-    index_processor.load.assert_called_once()
-    args, kwargs = index_processor.load.call_args
-    assert args[0] == dataset
-    assert len(args[1]) == 1
-    assert args[2] is None
-    assert kwargs["with_keywords"] is True
-    assert kwargs["keywords_list"] == [["k1"]]
-
-
-def test_create_segments_vector_regular_indexing_loads_multimodal_documents(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(is_multimodal=True)
-    segment = _make_segment(
-        attachments=[
-            {"id": "img-1", "name": "a.png"},
-            {"id": "img-2", "name": "b.png"},
-        ]
-    )
-
-    index_processor = MagicMock(name="index_processor")
-    factory_instance = MagicMock(name="IndexProcessorFactory-instance")
-    factory_instance.init_index_processor.return_value = index_processor
-    monkeypatch.setattr(vector_service_module, "IndexProcessorFactory", MagicMock(return_value=factory_instance))
-
-    VectorService.create_segments_vector([["k1"]], [segment], dataset, IndexStructureType.PARAGRAPH_INDEX, MagicMock())
-
-    assert index_processor.load.call_count == 2
-    first_args, first_kwargs = index_processor.load.call_args_list[0]
-    assert first_args[0] == dataset
-    assert len(first_args[1]) == 1
-    assert first_kwargs["with_keywords"] is True
-
-    second_args, second_kwargs = index_processor.load.call_args_list[1]
-    assert second_args[0] == dataset
-    assert second_args[1] == []
-    assert len(second_args[2]) == 2
-    assert second_kwargs["with_keywords"] is False
-
-
-def test_create_segments_vector_with_no_segments_does_not_load(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset()
-    index_processor = MagicMock(name="index_processor")
-    factory_instance = MagicMock()
-    factory_instance.init_index_processor.return_value = index_processor
-    monkeypatch.setattr(vector_service_module, "IndexProcessorFactory", MagicMock(return_value=factory_instance))
-
-    VectorService.create_segments_vector(None, [], dataset, IndexStructureType.PARAGRAPH_INDEX, MagicMock())
-    index_processor.load.assert_not_called()
-
-
-def _mock_parent_child_queries(
-    *,
-    dataset_document: object | None,
-    processing_rule: object | None,
-) -> MagicMock:
-    session = MagicMock(name="session")
-
-    get_dispatch: dict[object, object | None] = {
-        vector_service_module.DatasetDocument: dataset_document,
-        vector_service_module.DatasetProcessRule: processing_rule,
-    }
-
-    def get_side_effect(model: object, pk: object) -> object | None:
-        return get_dispatch.get(model)
-
-    session.get.side_effect = get_side_effect
-    db_mock = MagicMock(name="db")
-    db_mock.session = session
-    return db_mock
-
-
-def test_create_segments_vector_parent_child_calls_generate_child_chunks_with_explicit_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = _make_dataset(
-        doc_form=vector_service_module.IndexStructureType.PARENT_CHILD_INDEX,
+@pytest.fixture
+def rows(orm_session: Session) -> Rows:
+    dataset = Dataset(
+        id="dataset-1",
+        tenant_id="tenant-1",
+        name="Knowledge",
+        data_source_type=DataSourceType.UPLOAD_FILE,
+        indexing_technique=IndexTechniqueType.HIGH_QUALITY,
+        created_by="user-1",
         embedding_model_provider="openai",
-        indexing_technique=IndexTechniqueType.HIGH_QUALITY,
+        embedding_model="text-embedding",
+        chunk_structure=IndexStructureType.PARAGRAPH_INDEX,
+        is_multimodal=False,
     )
-    segment = _make_segment()
-
-    dataset_document = MagicMock(name="dataset_document")
-    dataset_document.id = segment.document_id
-    dataset_document.dataset_process_rule_id = "rule-1"
-    dataset_document.doc_language = "en"
-    dataset_document.created_by = "user-1"
-
-    processing_rule = MagicMock(name="processing_rule")
-    processing_rule.to_dict.return_value = {"rules": {}}
-
-    db_mock = _mock_parent_child_queries(dataset_document=dataset_document, processing_rule=processing_rule)
-
-    embedding_model_instance = MagicMock(name="embedding_model_instance")
-    model_manager_instance = MagicMock(name="model_manager_instance")
-    model_manager_instance.get_model_instance.return_value = embedding_model_instance
-    monkeypatch.setattr(
-        vector_service_module.ModelManager, "for_tenant", MagicMock(return_value=model_manager_instance)
+    rule = DatasetProcessRule(
+        dataset_id=dataset.id,
+        mode=ProcessRuleMode.HIERARCHICAL,
+        rules=json.dumps({"segmentation": {"delimiter": "\\n", "max_tokens": 100}}),
+        created_by="user-1",
     )
-
-    generate_child_chunks_mock = MagicMock()
-    monkeypatch.setattr(VectorService, "generate_child_chunks", generate_child_chunks_mock)
-
-    index_processor = MagicMock()
-    factory_instance = MagicMock()
-    factory_instance.init_index_processor.return_value = index_processor
-    monkeypatch.setattr(vector_service_module, "IndexProcessorFactory", MagicMock(return_value=factory_instance))
-
-    VectorService.create_segments_vector(
-        None,
-        [segment],
-        dataset,
-        vector_service_module.IndexStructureType.PARENT_CHILD_INDEX,
-        db_mock.session,
+    document = Document(
+        id="document-1",
+        tenant_id=dataset.tenant_id,
+        dataset_id=dataset.id,
+        position=1,
+        data_source_type=DataSourceType.UPLOAD_FILE,
+        dataset_process_rule_id=rule.id,
+        batch="batch-1",
+        name="Document",
+        created_from=DocumentCreatedFrom.WEB,
+        created_by="user-1",
+        doc_form=IndexStructureType.PARAGRAPH_INDEX,
+        doc_language="en",
     )
-
-    model_manager_instance.get_model_instance.assert_called_once()
-    generate_child_chunks_mock.assert_called_once_with(
-        segment,
-        dataset_document,
-        dataset,
-        embedding_model_instance,
-        processing_rule,
-        db_mock.session,
-        False,
+    segment = DocumentSegment(
+        tenant_id=dataset.tenant_id,
+        dataset_id=dataset.id,
+        document_id=document.id,
+        position=1,
+        content="hello world",
+        word_count=2,
+        tokens=2,
+        created_by="user-1",
+        index_node_id="node-1",
+        index_node_hash="hash-1",
+        status=SegmentStatus.COMPLETED,
     )
-    index_processor.load.assert_not_called()
+    orm_session.add_all([dataset, rule, document, segment])
+    orm_session.commit()
+    return Rows(dataset=dataset, document=document, rule=rule, segment=segment)
 
 
-def test_create_segments_vector_parent_child_uses_default_embedding_model_when_provider_missing(
-    monkeypatch: pytest.MonkeyPatch,
+def _upload(session: Session, *, name: str, tenant_id: str = "tenant-1") -> UploadFile:
+    upload = UploadFile(
+        tenant_id=tenant_id,
+        storage_type=StorageType.LOCAL,
+        key=f"key-{name}",
+        name=name,
+        size=10,
+        extension="png",
+        mime_type="image/png",
+        created_by_role=CreatorUserRole.ACCOUNT,
+        created_by="user-1",
+        created_at=datetime(2024, 1, 1),
+        used=False,
+    )
+    session.add(upload)
+    session.commit()
+    return upload
+
+
+def _processor(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    processor = MagicMock()
+    factory = MagicMock()
+    factory.init_index_processor.return_value = processor
+    monkeypatch.setattr(vector_module, "IndexProcessorFactory", MagicMock(return_value=factory))
+    return processor
+
+
+@contextmanager
+def _bind_attachment_property(session: Session) -> Iterator[None]:
+    with patch.object(dataset_module.db, "session", session):
+        yield
+
+
+@contextmanager
+def _raise_before_commit(session: Session) -> Iterator[None]:
+    def raise_error(_session: Session) -> None:
+        raise RuntimeError("forced binding commit")
+
+    event.listen(session, "before_commit", raise_error)
+    try:
+        yield
+    finally:
+        event.remove(session, "before_commit", raise_error)
+
+
+def test_create_segments_vector_loads_regular_and_multimodal_documents(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
 ) -> None:
-    dataset = _make_dataset(
-        doc_form=vector_service_module.IndexStructureType.PARENT_CHILD_INDEX,
-        embedding_model_provider=None,
-        indexing_technique=IndexTechniqueType.HIGH_QUALITY,
-    )
-    segment = _make_segment()
-
-    dataset_document = MagicMock()
-    dataset_document.dataset_process_rule_id = "rule-1"
-    dataset_document.doc_language = "en"
-    dataset_document.created_by = "user-1"
-
-    processing_rule = MagicMock()
-    processing_rule.to_dict.return_value = {"rules": {}}
-
-    db_mock = _mock_parent_child_queries(dataset_document=dataset_document, processing_rule=processing_rule)
-
-    embedding_model_instance = MagicMock()
-    model_manager_instance = MagicMock()
-    model_manager_instance.get_default_model_instance.return_value = embedding_model_instance
-    monkeypatch.setattr(
-        vector_service_module.ModelManager, "for_tenant", MagicMock(return_value=model_manager_instance)
-    )
-
-    generate_child_chunks_mock = MagicMock()
-    monkeypatch.setattr(VectorService, "generate_child_chunks", generate_child_chunks_mock)
-
-    index_processor = MagicMock()
-    factory_instance = MagicMock()
-    factory_instance.init_index_processor.return_value = index_processor
-    monkeypatch.setattr(vector_service_module, "IndexProcessorFactory", MagicMock(return_value=factory_instance))
-
-    VectorService.create_segments_vector(
-        None,
-        [segment],
-        dataset,
-        vector_service_module.IndexStructureType.PARENT_CHILD_INDEX,
-        db_mock.session,
-    )
-
-    model_manager_instance.get_default_model_instance.assert_called_once()
-    generate_child_chunks_mock.assert_called_once()
-
-
-def test_create_segments_vector_parent_child_missing_document_logs_warning_and_continues(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    dataset = _make_dataset(doc_form=vector_service_module.IndexStructureType.PARENT_CHILD_INDEX)
-    segment = _make_segment()
-
-    processing_rule = MagicMock()
-    db_mock = _mock_parent_child_queries(dataset_document=None, processing_rule=processing_rule)
-
-    index_processor = MagicMock()
-    factory_instance = MagicMock()
-    factory_instance.init_index_processor.return_value = index_processor
-    monkeypatch.setattr(vector_service_module, "IndexProcessorFactory", MagicMock(return_value=factory_instance))
-
-    with caplog.at_level(logging.WARNING, logger="services.vector_service"):
+    processor = _processor(monkeypatch)
+    with _bind_attachment_property(orm_session):
         VectorService.create_segments_vector(
-            None,
-            [segment],
-            dataset,
-            vector_service_module.IndexStructureType.PARENT_CHILD_INDEX,
-            db_mock.session,
+            [["keyword"]], [rows.segment], rows.dataset, IndexStructureType.PARAGRAPH_INDEX, orm_session
         )
-        assert any(r.levelno >= logging.WARNING for r in caplog.records)
-    index_processor.load.assert_not_called()
+    processor.load.assert_called_once()
+    assert processor.load.call_args.kwargs["keywords_list"] == [["keyword"]]
+
+    upload = _upload(orm_session, name="image.png")
+    orm_session.add(
+        SegmentAttachmentBinding(
+            tenant_id=rows.dataset.tenant_id,
+            dataset_id=rows.dataset.id,
+            document_id=rows.document.id,
+            segment_id=rows.segment.id,
+            attachment_id=upload.id,
+        )
+    )
+    rows.dataset.is_multimodal = True
+    orm_session.commit()
+    processor.reset_mock()
+    with _bind_attachment_property(orm_session):
+        VectorService.create_segments_vector(
+            None, [rows.segment], rows.dataset, IndexStructureType.PARAGRAPH_INDEX, orm_session
+        )
+    assert processor.load.call_count == 2
+    assert len(processor.load.call_args_list[1].args[2]) == 1
 
 
-def test_create_segments_vector_parent_child_missing_processing_rule_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(doc_form=vector_service_module.IndexStructureType.PARENT_CHILD_INDEX)
-    segment = _make_segment()
+def test_create_segments_vector_empty_does_not_load(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
+) -> None:
+    processor = _processor(monkeypatch)
+    VectorService.create_segments_vector(None, [], rows.dataset, IndexStructureType.PARAGRAPH_INDEX, orm_session)
+    processor.load.assert_not_called()
 
-    dataset_document = MagicMock()
-    dataset_document.dataset_process_rule_id = "rule-1"
-    db_mock = _mock_parent_child_queries(dataset_document=dataset_document, processing_rule=None)
 
+def test_parent_child_lookup_uses_persisted_document_and_rule(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
+) -> None:
+    rows.dataset.chunk_structure = IndexStructureType.PARENT_CHILD_INDEX
+    orm_session.commit()
+    model = MagicMock()
+    manager = MagicMock()
+    manager.get_model_instance.return_value = model
+    monkeypatch.setattr(vector_module.ModelManager, "for_tenant", MagicMock(return_value=manager))
+    generate = MagicMock()
+    monkeypatch.setattr(VectorService, "generate_child_chunks", generate)
+    processor = _processor(monkeypatch)
+    VectorService.create_segments_vector(
+        None, [rows.segment], rows.dataset, IndexStructureType.PARENT_CHILD_INDEX, orm_session
+    )
+    generate.assert_called_once_with(rows.segment, rows.document, rows.dataset, model, rows.rule, orm_session, False)
+    processor.load.assert_not_called()
+
+
+def test_parent_child_uses_default_model_and_validates_persisted_state(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
+) -> None:
+    rows.dataset.chunk_structure = IndexStructureType.PARENT_CHILD_INDEX
+    rows.dataset.embedding_model_provider = None
+    orm_session.commit()
+    manager = MagicMock()
+    manager.get_default_model_instance.return_value = MagicMock()
+    monkeypatch.setattr(vector_module.ModelManager, "for_tenant", MagicMock(return_value=manager))
+    monkeypatch.setattr(VectorService, "generate_child_chunks", MagicMock())
+    _processor(monkeypatch)
+    VectorService.create_segments_vector(
+        None, [rows.segment], rows.dataset, IndexStructureType.PARENT_CHILD_INDEX, orm_session
+    )
+    manager.get_default_model_instance.assert_called_once()
+
+    orm_session.delete(rows.rule)
+    orm_session.commit()
     with pytest.raises(ValueError, match="No processing rule found"):
         VectorService.create_segments_vector(
-            None,
-            [segment],
-            dataset,
-            vector_service_module.IndexStructureType.PARENT_CHILD_INDEX,
-            db_mock.session,
+            None, [rows.segment], rows.dataset, IndexStructureType.PARENT_CHILD_INDEX, orm_session
         )
 
 
-def test_create_segments_vector_parent_child_non_high_quality_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(
-        doc_form=vector_service_module.IndexStructureType.PARENT_CHILD_INDEX,
-        indexing_technique=IndexTechniqueType.ECONOMY,
+def test_parent_child_missing_document_logs_and_economy_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    orm_session: Session,
+    rows: Rows,
+) -> None:
+    missing_segment = DocumentSegment(
+        tenant_id="tenant-1",
+        dataset_id=rows.dataset.id,
+        document_id="missing",
+        position=2,
+        content="missing",
+        word_count=1,
+        tokens=1,
+        created_by="user-1",
+        index_node_id="node-2",
+        status=SegmentStatus.COMPLETED,
     )
-    segment = _make_segment()
-    dataset_document = MagicMock()
-    dataset_document.dataset_process_rule_id = "rule-1"
-    processing_rule = MagicMock()
-    db_mock = _mock_parent_child_queries(dataset_document=dataset_document, processing_rule=processing_rule)
+    orm_session.add(missing_segment)
+    orm_session.commit()
+    _processor(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="services.vector_service"):
+        VectorService.create_segments_vector(
+            None, [missing_segment], rows.dataset, IndexStructureType.PARENT_CHILD_INDEX, orm_session
+        )
+    assert "none was found" in caplog.text
 
+    rows.dataset.indexing_technique = IndexTechniqueType.ECONOMY
+    orm_session.commit()
     with pytest.raises(ValueError, match="not high quality"):
         VectorService.create_segments_vector(
-            None,
-            [segment],
-            dataset,
-            vector_service_module.IndexStructureType.PARENT_CHILD_INDEX,
-            db_mock.session,
+            None, [rows.segment], rows.dataset, IndexStructureType.PARENT_CHILD_INDEX, orm_session
         )
 
 
-def test_update_segment_vector_high_quality_uses_vector(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY)
-    segment = _make_segment()
+def test_update_segment_vector_uses_vector_or_keyword(monkeypatch: pytest.MonkeyPatch, rows: Rows) -> None:
+    vector = MagicMock()
+    monkeypatch.setattr(vector_module, "Vector", MagicMock(return_value=vector))
+    VectorService.update_segment_vector(["keyword"], rows.segment, rows.dataset)
+    vector.delete_by_ids.assert_called_once_with([rows.segment.index_node_id])
+    vector.add_texts.assert_called_once()
 
-    vector_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", MagicMock(return_value=vector_instance))
-
-    VectorService.update_segment_vector(["k"], segment, dataset)
-
-    vector_instance.delete_by_ids.assert_called_once_with([segment.index_node_id])
-    vector_instance.add_texts.assert_called_once()
-    add_args, add_kwargs = vector_instance.add_texts.call_args
-    assert len(add_args[0]) == 1
-    assert add_kwargs["duplicate_check"] is True
-
-
-def test_update_segment_vector_economy_uses_keyword_with_keywords_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.ECONOMY)
-    segment = _make_segment()
-
-    keyword_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Keyword", MagicMock(return_value=keyword_instance))
-
-    VectorService.update_segment_vector(["a", "b"], segment, dataset)
-
-    keyword_instance.delete_by_ids.assert_called_once_with([segment.index_node_id])
-    keyword_instance.add_texts.assert_called_once()
-    args, kwargs = keyword_instance.add_texts.call_args
-    assert len(args[0]) == 1
-    assert kwargs["keywords_list"] == [["a", "b"]]
+    rows.dataset.indexing_technique = IndexTechniqueType.ECONOMY
+    keyword = MagicMock()
+    monkeypatch.setattr(vector_module, "Keyword", MagicMock(return_value=keyword))
+    VectorService.update_segment_vector(["one", "two"], rows.segment, rows.dataset)
+    assert keyword.add_texts.call_args.kwargs["keywords_list"] == [["one", "two"]]
+    keyword.reset_mock()
+    VectorService.update_segment_vector(None, rows.segment, rows.dataset)
+    assert "keywords_list" not in keyword.add_texts.call_args.kwargs
 
 
-def test_update_segment_vector_economy_uses_keyword_without_keywords_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.ECONOMY)
-    segment = _make_segment()
-
-    keyword_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Keyword", MagicMock(return_value=keyword_instance))
-
-    VectorService.update_segment_vector(None, segment, dataset)
-    keyword_instance.add_texts.assert_called_once()
-    _, kwargs = keyword_instance.add_texts.call_args
-    assert "keywords_list" not in kwargs
-
-
-def test_generate_child_chunks_regenerate_cleans_then_saves_children(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(doc_form=IndexStructureType.PARAGRAPH_INDEX, tenant_id="tenant-1", dataset_id="dataset-1")
-    segment = _make_segment(segment_id="seg-1")
-
-    dataset_document = MagicMock()
-    dataset_document.id = segment.document_id
-    dataset_document.doc_language = "en"
-    dataset_document.created_by = "user-1"
-
-    processing_rule = MagicMock()
-    processing_rule.to_dict.return_value = {"rules": {}}
-
-    child1 = _ChildDocStub(page_content="c1", metadata={"doc_id": "c1-id", "doc_hash": "c1-h"})
-    child2 = _ChildDocStub(page_content="c2", metadata={"doc_id": "c2-id", "doc_hash": "c2-h"})
-    transformed = [_ParentDocStub(children=[child1, child2])]
-
-    index_processor = MagicMock()
-    index_processor.transform.return_value = transformed
-    factory_instance = MagicMock()
-    factory_instance.init_index_processor.return_value = index_processor
-    monkeypatch.setattr(vector_service_module, "IndexProcessorFactory", MagicMock(return_value=factory_instance))
-
-    child_chunk_ctor = MagicMock(side_effect=lambda **kwargs: kwargs)
-    monkeypatch.setattr(vector_service_module, "ChildChunk", child_chunk_ctor)
-
-    session = MagicMock()
-
-    VectorService.generate_child_chunks(
-        segment=segment,
-        dataset_document=dataset_document,
-        dataset=dataset,
-        embedding_model_instance=MagicMock(),
-        processing_rule=processing_rule,
-        session=session,
-        regenerate=True,
-    )
-
-    index_processor.clean.assert_called_once()
-    _, transform_kwargs = index_processor.transform.call_args
-    assert transform_kwargs["process_rule"]["rules"]["parent_mode"] == vector_service_module.ParentMode.FULL_DOC
-    index_processor.load.assert_called_once()
-    assert session.add.call_count == 2
-    session.commit.assert_called_once()
-
-
-def test_generate_child_chunks_commits_even_when_no_children(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(doc_form=IndexStructureType.PARAGRAPH_INDEX)
-    segment = _make_segment()
-    dataset_document = MagicMock()
-    dataset_document.doc_language = "en"
-    dataset_document.created_by = "user-1"
-
-    processing_rule = MagicMock()
-    processing_rule.to_dict.return_value = {"rules": {}}
-
-    index_processor = MagicMock()
-    index_processor.transform.return_value = [_ParentDocStub(children=[])]
-    factory_instance = MagicMock()
-    factory_instance.init_index_processor.return_value = index_processor
-    monkeypatch.setattr(vector_service_module, "IndexProcessorFactory", MagicMock(return_value=factory_instance))
-
-    session = MagicMock()
-
-    VectorService.generate_child_chunks(
-        segment=segment,
-        dataset_document=dataset_document,
-        dataset=dataset,
-        embedding_model_instance=MagicMock(),
-        processing_rule=processing_rule,
-        session=session,
-        regenerate=False,
-    )
-
-    index_processor.load.assert_not_called()
-    session.add.assert_not_called()
-    session.commit.assert_called_once()
-
-
-def test_create_child_chunk_vector_high_quality_adds_texts(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY)
-    child_chunk = MagicMock()
-    child_chunk.content = "child"
-    child_chunk.index_node_id = "id"
-    child_chunk.index_node_hash = "h"
-    child_chunk.document_id = "doc-1"
-    child_chunk.dataset_id = "dataset-1"
-
-    vector_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", MagicMock(return_value=vector_instance))
-
-    VectorService.create_child_chunk_vector(child_chunk, dataset)
-    vector_instance.add_texts.assert_called_once()
-
-
-def test_create_child_chunk_vector_economy_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.ECONOMY)
-    vector_cls = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", vector_cls)
-
-    child_chunk = MagicMock()
-    child_chunk.content = "child"
-    child_chunk.index_node_id = "id"
-    child_chunk.index_node_hash = "h"
-    child_chunk.document_id = "doc-1"
-    child_chunk.dataset_id = "dataset-1"
-
-    VectorService.create_child_chunk_vector(child_chunk, dataset)
-    vector_cls.assert_not_called()
-
-
-def test_update_child_chunk_vector_high_quality_updates_vector(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY)
-
-    new_chunk = MagicMock()
-    new_chunk.content = "n"
-    new_chunk.index_node_id = "nid"
-    new_chunk.index_node_hash = "nh"
-    new_chunk.document_id = "d"
-    new_chunk.dataset_id = "ds"
-
-    upd_chunk = MagicMock()
-    upd_chunk.content = "u"
-    upd_chunk.index_node_id = "uid"
-    upd_chunk.index_node_hash = "uh"
-    upd_chunk.document_id = "d"
-    upd_chunk.dataset_id = "ds"
-
-    del_chunk = MagicMock()
-    del_chunk.index_node_id = "did"
-
-    vector_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", MagicMock(return_value=vector_instance))
-
-    VectorService.update_child_chunk_vector([new_chunk], [upd_chunk], [del_chunk], dataset)
-
-    vector_instance.delete_by_ids.assert_called_once_with(["uid", "did"])
-    vector_instance.add_texts.assert_called_once()
-    docs = vector_instance.add_texts.call_args.args[0]
-    assert len(docs) == 2
-
-
-def test_update_child_chunk_vector_economy_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.ECONOMY)
-    vector_cls = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", vector_cls)
-    VectorService.update_child_chunk_vector([], [], [], dataset)
-    vector_cls.assert_not_called()
-
-
-def test_delete_child_chunk_vector_deletes_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset()
-    child_chunk = MagicMock()
-    child_chunk.index_node_id = "cid"
-
-    vector_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", MagicMock(return_value=vector_instance))
-
-    VectorService.delete_child_chunk_vector(child_chunk, dataset)
-    vector_instance.delete_by_ids.assert_called_once_with(["cid"])
-
-
-# ---------------------------------------------------------------------------
-# update_multimodel_vector (missing coverage in previous suites)
-# ---------------------------------------------------------------------------
-
-
-def test_update_multimodel_vector_returns_when_not_high_quality(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.ECONOMY, is_multimodal=True)
-    segment = _make_segment(tenant_id="t", attachments=[{"id": "a"}])
-
-    vector_cls = MagicMock()
-    db_mock = _mock_db_session_for_update_multimodel(upload_files=[])
-    monkeypatch.setattr(vector_service_module, "Vector", vector_cls)
-
-    VectorService.update_multimodel_vector(
-        segment=segment, attachment_ids=["a"], dataset=dataset, session=db_mock.session
-    )
-    vector_cls.assert_not_called()
-    db_mock.session.query.assert_not_called()
-
-
-def test_update_multimodel_vector_returns_when_no_actual_change(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY, is_multimodal=True)
-    segment = _make_segment(tenant_id="t", attachments=[{"id": "a"}, {"id": "b"}])
-
-    vector_cls = MagicMock()
-    db_mock = _mock_db_session_for_update_multimodel(upload_files=[])
-    monkeypatch.setattr(vector_service_module, "Vector", vector_cls)
-
-    VectorService.update_multimodel_vector(
-        segment=segment, attachment_ids=["b", "a"], dataset=dataset, session=db_mock.session
-    )
-    vector_cls.assert_not_called()
-    db_mock.session.query.assert_not_called()
-
-
-def test_update_multimodel_vector_deletes_bindings_and_commits_on_empty_new_ids(
-    monkeypatch: pytest.MonkeyPatch,
+def test_generate_child_chunks_persists_children_and_commits(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
 ) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY, is_multimodal=True)
-    segment = _make_segment(tenant_id="tenant-1", attachments=[{"id": "old-1"}, {"id": "old-2"}])
-
-    vector_instance = MagicMock(name="vector_instance")
-    vector_cls = MagicMock(return_value=vector_instance)
-    db_mock = _mock_db_session_for_update_multimodel(upload_files=[])
-
-    monkeypatch.setattr(vector_service_module, "Vector", vector_cls)
-
-    VectorService.update_multimodel_vector(segment=segment, attachment_ids=[], dataset=dataset, session=db_mock.session)
-
-    vector_cls.assert_called_once_with(dataset=dataset)
-    vector_instance.delete_by_ids.assert_called_once_with(["old-1", "old-2"])
-    db_mock.session.execute.assert_called_once()
-    db_mock.session.commit.assert_called_once()
-    db_mock.session.add_all.assert_not_called()
-    vector_instance.add_texts.assert_not_called()
-
-
-def test_update_multimodel_vector_commits_when_no_upload_files_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY, is_multimodal=True)
-    segment = _make_segment(tenant_id="tenant-1", attachments=[{"id": "old-1"}])
-
-    vector_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", MagicMock(return_value=vector_instance))
-    db_mock = _mock_db_session_for_update_multimodel(upload_files=[])
-
-    VectorService.update_multimodel_vector(
-        segment=segment, attachment_ids=["new-1"], dataset=dataset, session=db_mock.session
+    child = SimpleNamespace(page_content="child", metadata={"doc_id": "child-node", "doc_hash": "child-hash"})
+    transformed = [SimpleNamespace(children=[child])]
+    processor = _processor(monkeypatch)
+    processor.transform.return_value = transformed
+    VectorService.generate_child_chunks(
+        rows.segment, rows.document, rows.dataset, MagicMock(), rows.rule, orm_session, regenerate=True
     )
+    persisted = orm_session.scalar(select(ChildChunk).where(ChildChunk.segment_id == rows.segment.id))
+    assert persisted is not None
+    assert persisted.content == "child"
+    assert persisted.index_node_id == "child-node"
+    processor.clean.assert_called_once()
+    processor.load.assert_called_once()
 
-    db_mock.session.commit.assert_called_once()
-    db_mock.session.add_all.assert_not_called()
-    vector_instance.add_texts.assert_not_called()
 
-
-def test_update_multimodel_vector_adds_bindings_and_vectors_and_skips_missing_upload_files(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_generate_child_chunks_empty_result_persists_nothing(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
 ) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY, is_multimodal=True)
-    segment = _make_segment(segment_id="seg-1", tenant_id="tenant-1", attachments=[{"id": "old-1"}])
+    processor = _processor(monkeypatch)
+    processor.transform.return_value = [SimpleNamespace(children=[])]
+    VectorService.generate_child_chunks(
+        rows.segment, rows.document, rows.dataset, MagicMock(), rows.rule, orm_session, regenerate=False
+    )
+    assert orm_session.scalar(select(ChildChunk)) is None
+    processor.load.assert_not_called()
 
-    vector_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", MagicMock(return_value=vector_instance))
-    db_mock = _mock_db_session_for_update_multimodel(upload_files=[_UploadFileStub(id="file-1", name="img.png")])
 
-    binding_ctor = MagicMock(side_effect=lambda **kwargs: kwargs)
-    monkeypatch.setattr(vector_service_module, "SegmentAttachmentBinding", binding_ctor)
-    monkeypatch.setattr(vector_service_module, "delete", MagicMock())
-    monkeypatch.setattr(vector_service_module, "select", MagicMock())
+def test_child_chunk_vector_create_update_delete_boundaries(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
+) -> None:
+    child = ChildChunk(
+        tenant_id=rows.dataset.tenant_id,
+        dataset_id=rows.dataset.id,
+        document_id=rows.document.id,
+        segment_id=rows.segment.id,
+        position=1,
+        content="child",
+        word_count=1,
+        created_by="user-1",
+        index_node_id="child-node",
+        index_node_hash="child-hash",
+    )
+    orm_session.add(child)
+    orm_session.commit()
+    vector = MagicMock()
+    monkeypatch.setattr(vector_module, "Vector", MagicMock(return_value=vector))
+    VectorService.create_child_chunk_vector(child, rows.dataset)
+    VectorService.update_child_chunk_vector([child], [child], [child], rows.dataset)
+    VectorService.delete_child_chunk_vector(child, rows.dataset)
+    assert vector.add_texts.call_count == 2
+    assert vector.delete_by_ids.call_count == 2
 
-    with caplog.at_level(logging.WARNING, logger="services.vector_service"):
-        VectorService.update_multimodel_vector(
-            segment=segment,
-            attachment_ids=["file-1", "missing"],
-            dataset=dataset,
-            session=db_mock.session,
+    rows.dataset.indexing_technique = IndexTechniqueType.ECONOMY
+    vector.reset_mock()
+    VectorService.create_child_chunk_vector(child, rows.dataset)
+    VectorService.update_child_chunk_vector([child], [child], [child], rows.dataset)
+    vector.add_texts.assert_not_called()
+
+
+def test_update_multimodal_vector_replaces_bindings_and_vectors(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
+) -> None:
+    old = _upload(orm_session, name="old.png")
+    new = _upload(orm_session, name="new.png")
+    foreign = _upload(orm_session, name="foreign.png", tenant_id="tenant-2")
+    orm_session.add(
+        SegmentAttachmentBinding(
+            tenant_id=rows.dataset.tenant_id,
+            dataset_id=rows.dataset.id,
+            document_id=rows.document.id,
+            segment_id=rows.segment.id,
+            attachment_id=old.id,
         )
-        assert any(r.levelno >= logging.WARNING for r in caplog.records)
-    db_mock.session.add_all.assert_called_once()
-    bindings = db_mock.session.add_all.call_args.args[0]
-    assert len(bindings) == 1
-    assert bindings[0]["attachment_id"] == "file-1"
+    )
+    rows.dataset.is_multimodal = True
+    orm_session.commit()
+    vector = MagicMock()
+    monkeypatch.setattr(vector_module, "Vector", MagicMock(return_value=vector))
+    with _bind_attachment_property(orm_session):
+        VectorService.update_multimodel_vector(rows.segment, [new.id, "missing", foreign.id], rows.dataset, orm_session)
+    bindings = orm_session.scalars(
+        select(SegmentAttachmentBinding).where(SegmentAttachmentBinding.segment_id == rows.segment.id)
+    ).all()
+    assert {binding.attachment_id for binding in bindings} == {new.id, foreign.id}
+    vector.delete_by_ids.assert_called_once_with([old.id])
+    assert len(vector.create_multimodal.call_args.args[0]) == 2
 
-    vector_instance.create_multimodal.assert_called_once()
-    documents = vector_instance.create_multimodal.call_args.args[0]
-    assert len(documents) == 1
-    assert documents[0].page_content == "img.png"
-    assert documents[0].metadata["doc_id"] == "file-1"
-    db_mock.session.commit.assert_called_once()
 
-
-def test_update_multimodel_vector_updates_bindings_without_multimodal_vector_ops(
-    monkeypatch: pytest.MonkeyPatch,
+def test_update_multimodal_vector_empty_ids_deletes_bindings(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
 ) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY, is_multimodal=False)
-    segment = _make_segment(tenant_id="tenant-1", attachments=[{"id": "old-1"}])
-
-    vector_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", MagicMock(return_value=vector_instance))
-    db_mock = _mock_db_session_for_update_multimodel(upload_files=[_UploadFileStub(id="file-1", name="img.png")])
-    monkeypatch.setattr(
-        vector_service_module, "SegmentAttachmentBinding", MagicMock(side_effect=lambda **kwargs: kwargs)
+    upload = _upload(orm_session, name="old.png")
+    orm_session.add(
+        SegmentAttachmentBinding(
+            tenant_id=rows.dataset.tenant_id,
+            dataset_id=rows.dataset.id,
+            document_id=rows.document.id,
+            segment_id=rows.segment.id,
+            attachment_id=upload.id,
+        )
     )
-    monkeypatch.setattr(vector_service_module, "delete", MagicMock())
-    monkeypatch.setattr(vector_service_module, "select", MagicMock())
-
-    VectorService.update_multimodel_vector(
-        segment=segment, attachment_ids=["file-1"], dataset=dataset, session=db_mock.session
-    )
-
-    vector_instance.delete_by_ids.assert_not_called()
-    vector_instance.add_texts.assert_not_called()
-    db_mock.session.add_all.assert_called_once()
-    db_mock.session.commit.assert_called_once()
+    rows.dataset.is_multimodal = True
+    orm_session.commit()
+    monkeypatch.setattr(vector_module, "Vector", MagicMock(return_value=MagicMock()))
+    with _bind_attachment_property(orm_session):
+        VectorService.update_multimodel_vector(rows.segment, [], rows.dataset, orm_session)
+    assert orm_session.scalar(select(SegmentAttachmentBinding)) is None
 
 
-def test_update_multimodel_vector_rolls_back_and_reraises_on_error(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_update_multimodal_vector_noops_for_economy_or_unchanged(
+    monkeypatch: pytest.MonkeyPatch, orm_session: Session, rows: Rows
 ) -> None:
-    dataset = _make_dataset(indexing_technique=IndexTechniqueType.HIGH_QUALITY, is_multimodal=True)
-    segment = _make_segment(segment_id="seg-1", tenant_id="tenant-1", attachments=[{"id": "old-1"}])
+    vector = MagicMock()
+    monkeypatch.setattr(vector_module, "Vector", MagicMock(return_value=vector))
+    rows.dataset.indexing_technique = IndexTechniqueType.ECONOMY
+    VectorService.update_multimodel_vector(rows.segment, ["new"], rows.dataset, orm_session)
+    vector.assert_not_called()
+    rows.dataset.indexing_technique = IndexTechniqueType.HIGH_QUALITY
+    with patch.object(DocumentSegment, "attachments", new_callable=PropertyMock, return_value=[{"id": "same"}]):
+        VectorService.update_multimodel_vector(rows.segment, ["same"], rows.dataset, orm_session)
+    vector.create_multimodal.assert_not_called()
 
-    vector_instance = MagicMock()
-    monkeypatch.setattr(vector_service_module, "Vector", MagicMock(return_value=vector_instance))
-    db_mock = _mock_db_session_for_update_multimodel(upload_files=[_UploadFileStub(id="file-1", name="img.png")])
-    db_mock.session.commit.side_effect = RuntimeError("boom")
-    monkeypatch.setattr(
-        vector_service_module, "SegmentAttachmentBinding", MagicMock(side_effect=lambda **kwargs: kwargs)
+
+def test_update_multimodal_vector_rolls_back_delete_when_insert_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    orm_session: Session,
+    rows: Rows,
+) -> None:
+    old = _upload(orm_session, name="old.png")
+    new = _upload(orm_session, name="new.png")
+    binding = SegmentAttachmentBinding(
+        tenant_id=rows.dataset.tenant_id,
+        dataset_id=rows.dataset.id,
+        document_id=rows.document.id,
+        segment_id=rows.segment.id,
+        attachment_id=old.id,
     )
-    monkeypatch.setattr(vector_service_module, "delete", MagicMock())
-    monkeypatch.setattr(vector_service_module, "select", MagicMock())
-
-    with caplog.at_level(logging.ERROR, logger="services.vector_service"):
-        with pytest.raises(RuntimeError, match="boom"):
-            VectorService.update_multimodel_vector(
-                segment=segment, attachment_ids=["file-1"], dataset=dataset, session=db_mock.session
-            )
-
-        assert any(r.levelno >= logging.ERROR for r in caplog.records)
-    db_mock.session.rollback.assert_called_once()
+    orm_session.add(binding)
+    rows.dataset.is_multimodal = True
+    orm_session.commit()
+    binding_id = binding.id
+    monkeypatch.setattr(vector_module, "Vector", MagicMock(return_value=MagicMock()))
+    with (
+        _bind_attachment_property(orm_session),
+        _raise_before_commit(orm_session),
+        pytest.raises(RuntimeError, match="forced binding commit"),
+    ):
+        VectorService.update_multimodel_vector(rows.segment, [new.id], rows.dataset, orm_session)
+    orm_session.expire_all()
+    persisted = orm_session.get(SegmentAttachmentBinding, binding_id)
+    assert persisted is not None
+    assert persisted.attachment_id == old.id
