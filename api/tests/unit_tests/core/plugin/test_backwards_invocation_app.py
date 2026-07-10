@@ -1,30 +1,148 @@
 import json
-from types import SimpleNamespace
-from unittest.mock import MagicMock
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from pydantic import BaseModel
 from pytest_mock import MockerFixture
-from sqlalchemy.dialects import postgresql
+from sqlalchemy import Engine, event
+from sqlalchemy.orm import Session, sessionmaker
 
 from core.app.layers.pause_state_persist_layer import PauseStateLayerConfig
 from core.plugin.backwards_invocation.app import PluginAppBackwardsInvocation
 from core.plugin.backwards_invocation.base import BaseBackwardsInvocation
-from models.model import AppMode
+from extensions.ext_database import db
+from models import Account, TenantAccountJoin
+from models.base import TypeBase
+from models.enums import EndUserType
+from models.model import App, AppMode, AppModelConfig, EndUser, IconType
+from models.workflow import Workflow, WorkflowType
 
 
 class _Chunk(BaseModel):
     value: int
 
 
-def _build_app_model_config(result: dict | None = None):
-    app_model_config = MagicMock()
-    app_model_config.app_id = "app-1"
-    app_model_config.to_dict.return_value = result or {
-        "user_input_form": [{"name": "bar"}],
-        "annotation_reply": {"enabled": False},
+@pytest.fixture
+def orm_session(sqlite_engine: Engine) -> Iterator[Session]:
+    models = (App, EndUser, Account, TenantAccountJoin, Workflow, AppModelConfig)
+    tables = [model.metadata.tables[model.__tablename__] for model in models]
+    TypeBase.metadata.create_all(sqlite_engine, tables=tables)
+    session_maker = sessionmaker(bind=sqlite_engine, expire_on_commit=False)
+
+    with (
+        patch("core.plugin.backwards_invocation.app.create_session", new=session_maker),
+        patch.object(type(db), "engine", new_callable=PropertyMock, return_value=sqlite_engine),
+    ):
+        with session_maker() as session:
+            yield session
+
+
+def _persist_app(
+    session: Session,
+    *,
+    mode: AppMode,
+    tenant_id: str | None = None,
+) -> App:
+    app = App(
+        id=str(uuid.uuid4()),
+        tenant_id=tenant_id or str(uuid.uuid4()),
+        name="Plugin App",
+        mode=mode,
+        icon_type=IconType.EMOJI,
+        icon="plugin",
+        icon_background="#FFFFFF",
+        enable_site=True,
+        enable_api=False,
+    )
+    session.add(app)
+    session.commit()
+    return app
+
+
+def _persist_end_user(
+    session: Session,
+    app: App,
+    *,
+    session_id: str | None = None,
+) -> EndUser:
+    end_user = EndUser(
+        id=str(uuid.uuid4()),
+        tenant_id=app.tenant_id,
+        app_id=app.id,
+        type=EndUserType.BROWSER,
+        name="Plugin User",
+        session_id=session_id or str(uuid.uuid4()),
+    )
+    session.add(end_user)
+    session.commit()
+    return end_user
+
+
+def _persist_account(session: Session, app: App, *, joined: bool = True) -> Account:
+    account = Account(name="Plugin Account", email=f"{uuid.uuid4()}@example.com")
+    session.add(account)
+    if joined:
+        session.add(TenantAccountJoin(tenant_id=app.tenant_id, account_id=account.id))
+    session.commit()
+    return account
+
+
+def _persist_workflow(session: Session, app: App) -> Workflow:
+    graph = {
+        "nodes": [
+            {
+                "data": {
+                    "type": "start",
+                    "variables": [{"type": "text-input", "variable": "foo", "label": "Foo"}],
+                }
+            }
+        ]
     }
+    workflow = Workflow.new(
+        tenant_id=app.tenant_id,
+        app_id=app.id,
+        type=WorkflowType.WORKFLOW.value,
+        version="1",
+        graph=json.dumps(graph),
+        features=json.dumps({"feature": "v"}),
+        created_by="owner-id",
+        environment_variables=[],
+        conversation_variables=[],
+        rag_pipeline_variables=[],
+    )
+    app.workflow_id = workflow.id
+    session.add_all([workflow, app])
+    session.commit()
+    return workflow
+
+
+def _persist_app_model_config(session: Session, app: App) -> AppModelConfig:
+    app_model_config = AppModelConfig(
+        app_id=app.id,
+        user_input_form=json.dumps([{"name": "bar"}]),
+    )
+    app.app_model_config_id = app_model_config.id
+    session.add_all([app_model_config, app])
+    session.commit()
     return app_model_config
+
+
+@contextmanager
+def _raise_on_apps(engine: Engine) -> Iterator[None]:
+    """Force only the App lookup SQL to fail while retaining a real Session."""
+
+    def fail_app_query(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if "FROM apps" in statement:
+            raise RuntimeError("forced app lookup failure")
+
+    event.listen(engine, "before_cursor_execute", fail_app_query)
+    try:
+        yield
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_app_query)
 
 
 class TestBaseBackwardsInvocation:
@@ -53,46 +171,35 @@ class TestBaseBackwardsInvocation:
 
 
 class TestPluginAppBackwardsInvocation:
-    def patch_create_session(self, mocker: MockerFixture, *, return_value=None, side_effect=None):
-        session = MagicMock()
-        if side_effect is not None:
-            session.scalar.side_effect = side_effect
-        else:
-            session.scalar.return_value = return_value
-        session_ctx = MagicMock()
-        session_ctx.__enter__.return_value = session
-        session_ctx.__exit__.return_value = None
-        mocker.patch("core.plugin.backwards_invocation.app.create_session", return_value=session_ctx)
-        return session
-
-    def test_fetch_app_info_workflow_path(self, mocker: MockerFixture):
-        workflow = MagicMock()
-        workflow.features_dict = {"feature": "v"}
-        workflow.user_input_form.return_value = [{"name": "foo"}]
-        app = MagicMock(mode=AppMode.WORKFLOW)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app", return_value=app)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_workflow", return_value=workflow)
+    def test_fetch_app_info_workflow_path(self, mocker: MockerFixture, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.WORKFLOW)
+        _persist_workflow(orm_session, app)
         mapper = mocker.patch(
             "core.plugin.backwards_invocation.app.get_parameters_from_feature_dict",
             return_value={"mapped": True},
         )
 
-        result = PluginAppBackwardsInvocation.fetch_app_info("app-1", "tenant-1")
+        result = PluginAppBackwardsInvocation.fetch_app_info(app.id, app.tenant_id)
 
         assert result == {"data": {"mapped": True}}
-        mapper.assert_called_once_with(features_dict={"feature": "v"}, user_input_form=[{"name": "foo"}])
+        mapper.assert_called_once_with(
+            features_dict={"feature": "v"},
+            user_input_form=[{"text-input": {"type": "text-input", "variable": "foo", "label": "Foo"}}],
+        )
 
-    def test_fetch_app_info_model_config_path(self, mocker: MockerFixture):
-        model_config_dict = {"user_input_form": [{"name": "bar"}], "k": "v"}
-        app = MagicMock(mode=AppMode.COMPLETION)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app", return_value=app)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app_model_config_dict", return_value=model_config_dict)
+    def test_fetch_app_info_model_config_path(self, mocker: MockerFixture, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.COMPLETION)
+        _persist_app_model_config(orm_session, app)
+        mocker.patch(
+            "core.plugin.backwards_invocation.app.load_annotation_reply_config",
+            return_value={"enabled": False},
+        )
         mocker.patch(
             "core.plugin.backwards_invocation.app.get_parameters_from_feature_dict",
             return_value={"mapped": True},
         )
 
-        result = PluginAppBackwardsInvocation.fetch_app_info("app-1", "tenant-1")
+        result = PluginAppBackwardsInvocation.fetch_app_info(app.id, app.tenant_id)
 
         assert result["data"] == {"mapped": True}
 
@@ -106,20 +213,24 @@ class TestPluginAppBackwardsInvocation:
             (AppMode.COMPLETION, "invoke_completion_app"),
         ],
     )
-    def test_invoke_app_routes_by_mode(self, mocker: MockerFixture, mode, route_method):
-        app = MagicMock(mode=mode)
-        user = MagicMock()
-        workflow = MagicMock()
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app", return_value=app)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_user", return_value=user)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_workflow", return_value=workflow)
+    def test_invoke_app_routes_by_mode(
+        self,
+        mocker: MockerFixture,
+        mode: AppMode,
+        route_method: str,
+        orm_session: Session,
+    ):
+        app = _persist_app(orm_session, mode=mode)
+        user = _persist_end_user(orm_session, app)
+        if mode == AppMode.WORKFLOW:
+            _persist_workflow(orm_session, app)
         route = mocker.patch.object(PluginAppBackwardsInvocation, route_method, return_value={"routed": True})
 
         result = PluginAppBackwardsInvocation.invoke_app(
-            MagicMock(),
-            app_id="app",
-            user_id="user",
-            tenant_id="tenant",
+            orm_session,
+            app_id=app.id,
+            user_id=user.id,
+            tenant_id=app.tenant_id,
             conversation_id=None,
             query="hello",
             stream=False,
@@ -130,12 +241,10 @@ class TestPluginAppBackwardsInvocation:
         assert result == {"routed": True}
         assert route.call_count == 1
 
-    def test_invoke_app_uses_end_user_when_user_id_missing(self, mocker: MockerFixture):
-        app = MagicMock(mode=AppMode.WORKFLOW)
+    def test_invoke_app_uses_end_user_when_user_id_missing(self, mocker: MockerFixture, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.WORKFLOW)
+        workflow = _persist_workflow(orm_session, app)
         end_user = MagicMock()
-        workflow = MagicMock()
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app", return_value=app)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_workflow", return_value=workflow)
         get_or_create = mocker.patch(
             "core.plugin.backwards_invocation.app.EndUserService.get_or_create_end_user",
             return_value=end_user,
@@ -143,10 +252,10 @@ class TestPluginAppBackwardsInvocation:
         route = mocker.patch.object(PluginAppBackwardsInvocation, "invoke_workflow_app", return_value={"ok": True})
 
         result = PluginAppBackwardsInvocation.invoke_app(
-            MagicMock(),
-            app_id="app",
+            orm_session,
+            app_id=app.id,
             user_id="",
-            tenant_id="tenant",
+            tenant_id=app.tenant_id,
             conversation_id="",
             query=None,
             stream=True,
@@ -155,20 +264,21 @@ class TestPluginAppBackwardsInvocation:
         )
 
         assert result == {"ok": True}
-        get_or_create.assert_called_once_with(app)
-        assert route.call_args.args[1] is workflow
+        assert get_or_create.call_count == 1
+        assert get_or_create.call_args.args[0].id == app.id
+        assert route.call_args.args[1].id == workflow.id
         assert route.call_args.args[2] is end_user
 
-    def test_invoke_app_missing_query_for_chat_raises(self, mocker: MockerFixture):
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app", return_value=MagicMock(mode=AppMode.CHAT))
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_user", return_value=MagicMock())
+    def test_invoke_app_missing_query_for_chat_raises(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHAT)
+        user = _persist_end_user(orm_session, app)
 
         with pytest.raises(ValueError, match="missing query"):
             PluginAppBackwardsInvocation.invoke_app(
-                MagicMock(),
-                app_id="app",
-                user_id="user",
-                tenant_id="tenant",
+                orm_session,
+                app_id=app.id,
+                user_id=user.id,
+                tenant_id=app.tenant_id,
                 conversation_id=None,
                 query="",
                 stream=False,
@@ -176,16 +286,16 @@ class TestPluginAppBackwardsInvocation:
                 files=[],
             )
 
-    def test_invoke_app_unexpected_mode_raises(self, mocker: MockerFixture):
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app", return_value=MagicMock(mode="other"))
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_user", return_value=MagicMock())
+    def test_invoke_app_unexpected_mode_raises(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHANNEL)
+        user = _persist_end_user(orm_session, app)
 
         with pytest.raises(ValueError, match="unexpected app type"):
             PluginAppBackwardsInvocation.invoke_app(
-                MagicMock(),
-                app_id="app",
-                user_id="user",
-                tenant_id="tenant",
+                orm_session,
+                app_id=app.id,
+                user_id=user.id,
+                tenant_id=app.tenant_id,
                 conversation_id=None,
                 query="q",
                 stream=False,
@@ -200,14 +310,21 @@ class TestPluginAppBackwardsInvocation:
             (AppMode.CHAT, "core.plugin.backwards_invocation.app.ChatAppGenerator.generate"),
         ],
     )
-    def test_invoke_chat_app_agent_and_chat(self, mocker: MockerFixture, mode, generator_path):
-        app = MagicMock(mode=mode, workflow=None)
+    def test_invoke_chat_app_agent_and_chat(
+        self,
+        mocker: MockerFixture,
+        mode: AppMode,
+        generator_path: str,
+        orm_session: Session,
+    ):
+        app = _persist_app(orm_session, mode=mode)
+        user = _persist_end_user(orm_session, app)
         spy = mocker.patch(generator_path, return_value={"result": "ok"})
 
         result = PluginAppBackwardsInvocation.invoke_chat_app(
-            MagicMock(),
+            orm_session,
             app=app,
-            user=MagicMock(),
+            user=user,
             conversation_id="conv-1",
             query="hello",
             stream=False,
@@ -218,27 +335,21 @@ class TestPluginAppBackwardsInvocation:
         assert result == {"result": "ok"}
         assert spy.call_count == 1
 
-    def test_invoke_chat_app_advanced_chat_injects_pause_state_config(self, mocker: MockerFixture):
-        workflow = MagicMock()
-        workflow.created_by = "owner-id"
-
-        app = MagicMock()
-        app.mode = AppMode.ADVANCED_CHAT
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_workflow", return_value=workflow)
-
-        mocker.patch(
-            "core.plugin.backwards_invocation.app.db",
-            SimpleNamespace(engine=MagicMock()),
-        )
+    def test_invoke_chat_app_advanced_chat_injects_pause_state_config(
+        self, mocker: MockerFixture, orm_session: Session
+    ):
+        app = _persist_app(orm_session, mode=AppMode.ADVANCED_CHAT)
+        _persist_workflow(orm_session, app)
+        user = _persist_end_user(orm_session, app)
         generator_spy = mocker.patch(
             "core.plugin.backwards_invocation.app.AdvancedChatAppGenerator.generate",
             return_value={"result": "ok"},
         )
 
         result = PluginAppBackwardsInvocation.invoke_chat_app(
-            MagicMock(),
+            orm_session,
             app=app,
-            user=MagicMock(),
+            user=user,
             conversation_id="conv-1",
             query="hello",
             stream=False,
@@ -252,14 +363,14 @@ class TestPluginAppBackwardsInvocation:
         assert isinstance(pause_state_config, PauseStateLayerConfig)
         assert pause_state_config.state_owner_user_id == "owner-id"
 
-    def test_invoke_chat_app_advanced_chat_without_workflow_raises(self, mocker: MockerFixture):
-        app = MagicMock(mode=AppMode.ADVANCED_CHAT)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_workflow", return_value=None)
+    def test_invoke_chat_app_advanced_chat_without_workflow_raises(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.ADVANCED_CHAT)
+        user = _persist_end_user(orm_session, app)
         with pytest.raises(ValueError, match="unexpected app type"):
             PluginAppBackwardsInvocation.invoke_chat_app(
-                MagicMock(),
+                orm_session,
                 app=app,
-                user=MagicMock(),
+                user=user,
                 conversation_id="conv-1",
                 query="hello",
                 stream=False,
@@ -267,13 +378,14 @@ class TestPluginAppBackwardsInvocation:
                 files=[],
             )
 
-    def test_invoke_chat_app_unexpected_mode_raises(self):
-        app = MagicMock(mode="invalid")
+    def test_invoke_chat_app_unexpected_mode_raises(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHANNEL)
+        user = _persist_end_user(orm_session, app)
         with pytest.raises(ValueError, match="unexpected app type"):
             PluginAppBackwardsInvocation.invoke_chat_app(
-                MagicMock(),
+                orm_session,
                 app=app,
-                user=MagicMock(),
+                user=user,
                 conversation_id="conv-1",
                 query="hello",
                 stream=False,
@@ -281,17 +393,10 @@ class TestPluginAppBackwardsInvocation:
                 files=[],
             )
 
-    def test_invoke_workflow_app_injects_pause_state_config(self, mocker: MockerFixture):
-        workflow = MagicMock()
-        workflow.created_by = "owner-id"
-
-        app = MagicMock()
-        app.mode = AppMode.WORKFLOW
-
-        mocker.patch(
-            "core.plugin.backwards_invocation.app.db",
-            SimpleNamespace(engine=MagicMock()),
-        )
+    def test_invoke_workflow_app_injects_pause_state_config(self, mocker: MockerFixture, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.WORKFLOW)
+        workflow = _persist_workflow(orm_session, app)
+        user = _persist_end_user(orm_session, app)
         generator_spy = mocker.patch(
             "core.plugin.backwards_invocation.app.WorkflowAppGenerator.generate",
             return_value={"result": "ok"},
@@ -300,7 +405,7 @@ class TestPluginAppBackwardsInvocation:
         result = PluginAppBackwardsInvocation.invoke_workflow_app(
             app=app,
             workflow=workflow,
-            user=MagicMock(),
+            user=user,
             stream=False,
             inputs={"k": "v"},
             files=[],
@@ -312,17 +417,15 @@ class TestPluginAppBackwardsInvocation:
         assert isinstance(pause_state_config, PauseStateLayerConfig)
         assert pause_state_config.state_owner_user_id == "owner-id"
 
-    def test_invoke_app_workflow_without_workflow_raises(self, mocker: MockerFixture):
-        app = MagicMock(mode=AppMode.WORKFLOW)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app", return_value=app)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_user", return_value=MagicMock())
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_workflow", return_value=None)
+    def test_invoke_app_workflow_without_workflow_raises(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.WORKFLOW)
+        user = _persist_end_user(orm_session, app)
         with pytest.raises(ValueError, match="unexpected app type"):
             PluginAppBackwardsInvocation.invoke_app(
-                MagicMock(),
-                app_id="app",
-                user_id="user",
-                tenant_id="tenant",
+                orm_session,
+                app_id=app.id,
+                user_id=user.id,
+                tenant_id=app.tenant_id,
                 conversation_id=None,
                 query=None,
                 stream=False,
@@ -330,77 +433,64 @@ class TestPluginAppBackwardsInvocation:
                 files=[],
             )
 
-    def test_invoke_completion_app(self, mocker: MockerFixture):
+    def test_invoke_completion_app(self, mocker: MockerFixture, orm_session: Session):
         spy = mocker.patch(
             "core.plugin.backwards_invocation.app.CompletionAppGenerator.generate", return_value={"ok": 1}
         )
-        app = MagicMock(mode=AppMode.COMPLETION)
+        app = _persist_app(orm_session, mode=AppMode.COMPLETION)
+        user = _persist_end_user(orm_session, app)
 
-        result = PluginAppBackwardsInvocation.invoke_completion_app(MagicMock(), app, MagicMock(), False, {"x": 1}, [])
+        result = PluginAppBackwardsInvocation.invoke_completion_app(orm_session, app, user, False, {"x": 1}, [])
 
         assert result == {"ok": 1}
         assert spy.call_count == 1
 
-    def test_get_user_returns_end_user(self, mocker: MockerFixture):
-        session = self.patch_create_session(mocker, side_effect=[MagicMock(id="end-user")])
-        app = SimpleNamespace(id="app-1", tenant_id="tenant-1")
+    def test_get_user_returns_end_user(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHAT)
+        end_user = _persist_end_user(orm_session, app)
 
-        user = PluginAppBackwardsInvocation._get_user("uid", app)
+        user = PluginAppBackwardsInvocation._get_user(end_user.id, app)
 
-        assert user.id == "end-user"
-        stmt = session.scalar.call_args_list[0].args[0]
-        compiled = str(stmt.compile(dialect=postgresql.dialect()))
-        assert "end_users.id" in compiled
-        assert "end_users.tenant_id" in compiled
-        assert "end_users.app_id" in compiled
-        assert stmt.compile().params == {"id_1": "uid", "tenant_id_1": "tenant-1", "app_id_1": "app-1"}
+        assert user.id == end_user.id
+        assert user.tenant_id == app.tenant_id
+        assert user.app_id == app.id
 
-    def test_get_user_returns_end_user_by_session_id(self, mocker: MockerFixture):
-        session = self.patch_create_session(mocker, side_effect=[None, MagicMock(id="session-user")])
-        app = SimpleNamespace(id="app-1", tenant_id="tenant-1")
+    def test_get_user_returns_end_user_by_session_id(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHAT)
+        other_app = _persist_app(orm_session, mode=AppMode.CHAT, tenant_id=app.tenant_id)
+        session_id = "wecom-sender-1"
+        _persist_end_user(orm_session, other_app, session_id=session_id)
+        target_user = _persist_end_user(orm_session, app, session_id=session_id)
 
-        user = PluginAppBackwardsInvocation._get_user("wecom-sender-1", app)
+        user = PluginAppBackwardsInvocation._get_user(session_id, app)
 
-        assert user.id == "session-user"
-        stmt = session.scalar.call_args_list[1].args[0]
-        compiled = str(stmt.compile(dialect=postgresql.dialect()))
-        assert "end_users.session_id" in compiled
-        assert "end_users.tenant_id" in compiled
-        assert "end_users.app_id" in compiled
-        assert stmt.compile().params == {
-            "session_id_1": "wecom-sender-1",
-            "tenant_id_1": "tenant-1",
-            "app_id_1": "app-1",
-        }
+        assert user.id == target_user.id
+        assert user.app_id == app.id
 
-    def test_get_user_falls_back_to_account_user(self, mocker: MockerFixture):
-        session = self.patch_create_session(mocker, side_effect=[None, None, MagicMock(id="account-user")])
-        app = SimpleNamespace(id="app-1", tenant_id="tenant-1")
+    def test_get_user_falls_back_to_account_user(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHAT)
+        account = _persist_account(orm_session, app)
 
-        user = PluginAppBackwardsInvocation._get_user("uid", app)
+        user = PluginAppBackwardsInvocation._get_user(account.id, app)
 
-        assert user.id == "account-user"
-        stmt = session.scalar.call_args_list[2].args[0]
-        compiled = str(stmt.compile(dialect=postgresql.dialect()))
-        assert "accounts.id" in compiled
-        assert "tenant_account_joins.account_id" in compiled
-        assert "tenant_account_joins.tenant_id" in compiled
-        assert stmt.compile().params == {"id_1": "uid", "tenant_id_1": "tenant-1"}
+        assert user.id == account.id
+        assert user.email == account.email
 
-    def test_get_user_raises_when_user_not_found(self, mocker: MockerFixture):
-        self.patch_create_session(mocker, side_effect=[None, None, None])
-        app = SimpleNamespace(id="app-1", tenant_id="tenant-1")
+    def test_get_user_raises_when_user_not_found(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHAT)
+        other_app = _persist_app(orm_session, mode=AppMode.CHAT)
+        account = _persist_account(orm_session, app, joined=False)
+        _persist_end_user(orm_session, other_app, session_id=account.id)
 
         with pytest.raises(ValueError, match="user not found"):
-            PluginAppBackwardsInvocation._get_user("uid", app)
+            PluginAppBackwardsInvocation._get_user(account.id, app)
 
-    def test_invoke_app_creates_end_user_for_unknown_external_user_id(self, mocker: MockerFixture):
-        app = MagicMock(mode=AppMode.WORKFLOW)
+    def test_invoke_app_creates_end_user_for_unknown_external_user_id(
+        self, mocker: MockerFixture, orm_session: Session
+    ):
+        app = _persist_app(orm_session, mode=AppMode.WORKFLOW)
+        workflow = _persist_workflow(orm_session, app)
         end_user = MagicMock()
-        workflow = MagicMock()
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_app", return_value=app)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_workflow", return_value=workflow)
-        mocker.patch.object(PluginAppBackwardsInvocation, "_get_user", side_effect=ValueError("user not found"))
         get_or_create = mocker.patch(
             "core.plugin.backwards_invocation.app.EndUserService.get_or_create_end_user",
             return_value=end_user,
@@ -408,10 +498,10 @@ class TestPluginAppBackwardsInvocation:
         route = mocker.patch.object(PluginAppBackwardsInvocation, "invoke_workflow_app", return_value={"ok": True})
 
         result = PluginAppBackwardsInvocation.invoke_app(
-            MagicMock(),
-            app_id="app",
+            orm_session,
+            app_id=app.id,
             user_id="wecom-sender-1",
-            tenant_id="tenant",
+            tenant_id=app.tenant_id,
             conversation_id="",
             query=None,
             stream=True,
@@ -420,66 +510,57 @@ class TestPluginAppBackwardsInvocation:
         )
 
         assert result == {"ok": True}
-        get_or_create.assert_called_once_with(app, user_id="wecom-sender-1")
+        assert get_or_create.call_count == 1
+        assert get_or_create.call_args.args[0].id == app.id
+        assert get_or_create.call_args.kwargs == {"user_id": "wecom-sender-1"}
         assert route.call_args.args[2] is end_user
 
-    def test_get_app_returns_app(self, mocker: MockerFixture):
-        app_obj = MagicMock(id="app")
-        self.patch_create_session(mocker, return_value=app_obj)
+    def test_get_app_returns_app(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHAT)
 
-        assert PluginAppBackwardsInvocation._get_app("app", "tenant") is app_obj
+        result = PluginAppBackwardsInvocation._get_app(app.id, app.tenant_id)
+        assert result.id == app.id
+        assert result.tenant_id == app.tenant_id
 
-    def test_get_app_raises_when_missing(self, mocker: MockerFixture):
-        self.patch_create_session(mocker, return_value=None)
-
-        with pytest.raises(ValueError, match="app not found"):
-            PluginAppBackwardsInvocation._get_app("app", "tenant")
-
-    def test_get_app_raises_when_query_fails(self, mocker: MockerFixture):
-        self.patch_create_session(mocker, side_effect=RuntimeError("db down"))
+    def test_get_app_raises_when_missing(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.CHAT)
 
         with pytest.raises(ValueError, match="app not found"):
-            PluginAppBackwardsInvocation._get_app("app", "tenant")
+            PluginAppBackwardsInvocation._get_app(app.id, str(uuid.uuid4()))
 
-    def test_get_workflow_stays_inside_app_boundary(self, mocker: MockerFixture):
-        workflow = MagicMock(id="workflow")
-        session = self.patch_create_session(mocker, return_value=workflow)
-        app = SimpleNamespace(id="app-1", tenant_id="tenant-1", workflow_id="workflow-1")
+    def test_get_app_raises_when_query_fails(self, orm_session: Session, sqlite_engine: Engine):
+        app = _persist_app(orm_session, mode=AppMode.CHAT)
 
-        assert PluginAppBackwardsInvocation._get_workflow(app) is workflow
+        with _raise_on_apps(sqlite_engine), pytest.raises(ValueError, match="app not found"):
+            PluginAppBackwardsInvocation._get_app(app.id, app.tenant_id)
 
-        stmt = session.scalar.call_args.args[0]
-        compiled = str(stmt.compile(dialect=postgresql.dialect()))
-        assert "workflows.id" in compiled
-        assert "workflows.tenant_id" in compiled
-        assert "workflows.app_id" in compiled
-        assert stmt.compile().params == {
-            "id_1": "workflow-1",
-            "tenant_id_1": "tenant-1",
-            "app_id_1": "app-1",
-            "param_1": 1,
-        }
+    def test_get_workflow_stays_inside_app_boundary(self, orm_session: Session):
+        app = _persist_app(orm_session, mode=AppMode.WORKFLOW)
+        workflow = _persist_workflow(orm_session, app)
 
-    def test_get_app_model_config_dict_uses_explicit_session_for_annotation_reply(self, mocker: MockerFixture):
+        result = PluginAppBackwardsInvocation._get_workflow(app)
+
+        assert result is not None
+        assert result.id == workflow.id
+        assert result.tenant_id == app.tenant_id
+        assert result.app_id == app.id
+
+    def test_get_app_model_config_dict_uses_explicit_session_for_annotation_reply(
+        self, mocker: MockerFixture, orm_session: Session
+    ):
         annotation_reply = {"enabled": False}
-        app_model_config = _build_app_model_config()
-        session = self.patch_create_session(mocker, return_value=app_model_config)
+        app = _persist_app(orm_session, mode=AppMode.COMPLETION)
+        app_model_config = _persist_app_model_config(orm_session, app)
         load_annotation_reply_config = mocker.patch(
             "core.plugin.backwards_invocation.app.load_annotation_reply_config",
             return_value=annotation_reply,
         )
-        app = SimpleNamespace(id="app-1", app_model_config_id="config-1")
-
         result = PluginAppBackwardsInvocation._get_app_model_config_dict(app)
 
         assert result is not None
         assert result["user_input_form"] == [{"name": "bar"}]
         assert result["annotation_reply"] == annotation_reply
-        load_annotation_reply_config.assert_called_once_with(session, "app-1")
-        app_model_config.to_dict.assert_called_once_with(annotation_reply=annotation_reply)
-
-        stmt = session.scalar.call_args.args[0]
-        compiled = str(stmt.compile(dialect=postgresql.dialect()))
-        assert "app_model_configs.id" in compiled
-        assert "app_model_configs.app_id" in compiled
-        assert stmt.compile().params == {"id_1": "config-1", "app_id_1": "app-1", "param_1": 1}
+        load_args = load_annotation_reply_config.call_args.args
+        assert isinstance(load_args[0], Session)
+        assert load_args[1] == app.id
+        assert app_model_config.app_id == app.id
