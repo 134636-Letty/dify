@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import builtins
+import json
 import sys
+from collections.abc import Iterator
 from datetime import datetime
 from importlib import util
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import ANY, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from flask import Flask
 from flask.views import MethodView
 from pydantic import ValidationError
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from werkzeug.datastructures import MultiDict
 
+import models.model as model_module
 from configs import dify_config
+from models.base import TypeBase
+from models.model import App, AppMode, Site, Tag, TagBinding
+from models.workflow import Workflow, WorkflowKind, WorkflowType
 
 # kombu references MethodView as a global when importing celery/kombu pools.
 if not hasattr(builtins, "MethodView"):
@@ -169,6 +177,79 @@ def patch_signed_url(monkeypatch: pytest.MonkeyPatch, app_module: ModuleType) ->
         return f"signed:{key}"
 
     monkeypatch.setattr(app_module, "build_icon_url", _fake_build_icon_url)
+
+
+@pytest.fixture
+def orm_session(sqlite_engine: Engine) -> Iterator[Session]:
+    """Provide caller-owned controller sessions with the required app schema."""
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[App.__table__, Workflow.__table__, Site.__table__, Tag.__table__, TagBinding.__table__],
+    )
+    with Session(sqlite_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture
+def bind_controller_db_sessions(
+    app_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_engine: Engine,
+) -> Iterator[scoped_session[Session]]:
+    """Bind service-owned controller and model lookups to a real scoped session."""
+    session_proxy = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    db_boundary = SimpleNamespace(engine=sqlite_engine, session=session_proxy)
+    monkeypatch.setattr(app_module, "db", db_boundary)
+    monkeypatch.setattr(model_module, "db", db_boundary)
+    try:
+        yield session_proxy
+    finally:
+        session_proxy.remove()
+
+
+def _app(
+    *,
+    app_id: str,
+    tenant_id: str = "tenant-1",
+    name: str = "Test App",
+    mode: AppMode = AppMode.WORKFLOW,
+) -> App:
+    return App(
+        id=app_id,
+        tenant_id=tenant_id,
+        name=name,
+        description="Summary",
+        mode=mode,
+        enable_site=True,
+        enable_api=True,
+        max_active_requests=0,
+    )
+
+
+def _workflow(
+    *,
+    workflow_id: str,
+    app_id: str,
+    tenant_id: str,
+    has_trigger: bool,
+) -> Workflow:
+    nodes = []
+    if has_trigger:
+        nodes.append({"id": "trigger-1", "data": {"type": "trigger-webhook", "title": "Trigger"}})
+    return Workflow(
+        id=workflow_id,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        type=WorkflowType.WORKFLOW,
+        kind=WorkflowKind.STANDARD,
+        version=Workflow.VERSION_DRAFT,
+        graph=json.dumps({"nodes": nodes, "edges": []}),
+        features="{}",
+        created_by="creator",
+        environment_variables=[],
+        conversation_variables=[],
+        rag_pipeline_variables=[],
+    )
 
 
 def _ts(hour: int = 12) -> datetime:
@@ -481,27 +562,37 @@ def test_app_pagination_aliases_per_page_and_has_next(app_models):
 
 
 def test_app_list_uses_injected_session_for_draft_workflows(
-    app: Flask, app_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+    app: Flask,
+    app_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    orm_session: Session,
+    bind_controller_db_sessions: scoped_session[Session],
 ) -> None:
     api = app_module.AppListApi()
     method = _unwrap(api.get)
-    app_item = SimpleNamespace(
-        id="app-1",
-        name="Workflow App",
-        desc_or_prompt="Summary",
-        mode="workflow",
-        mode_compatible_with_agent="workflow",
+    app_with_trigger = _app(app_id="app-1", name="Workflow App")
+    app_with_cross_tenant_trigger = _app(app_id="app-2", name="Other Workflow App")
+    matching_workflow = _workflow(
+        workflow_id="workflow-1",
+        app_id=app_with_trigger.id,
+        tenant_id="tenant-1",
+        has_trigger=True,
     )
-    app_pagination = SimpleNamespace(page=1, per_page=20, total=1, has_next=False, items=[app_item])
-    workflow = SimpleNamespace(
-        id="workflow-1",
-        app_id="app-1",
-        walk_nodes=lambda: iter([("trigger-1", {"type": "trigger-webhook"})]),
+    cross_tenant_workflow = _workflow(
+        workflow_id="workflow-2",
+        app_id=app_with_cross_tenant_trigger.id,
+        tenant_id="tenant-2",
+        has_trigger=True,
     )
-    session = MagicMock()
-    session.execute.return_value.scalars.return_value.all.return_value = [workflow]
-    scoped_session = MagicMock()
-    scoped_session.execute.side_effect = AssertionError("db.session should not be used")
+    orm_session.add_all([app_with_trigger, app_with_cross_tenant_trigger, matching_workflow, cross_tenant_workflow])
+    orm_session.commit()
+    app_pagination = SimpleNamespace(
+        page=1,
+        per_page=20,
+        total=2,
+        has_next=False,
+        items=[app_with_trigger, app_with_cross_tenant_trigger],
+    )
 
     monkeypatch.setattr(
         app_module,
@@ -527,32 +618,31 @@ def test_app_list_uses_injected_session_for_draft_workflows(
             )
         ),
     )
-    monkeypatch.setattr(app_module, "db", SimpleNamespace(session=scoped_session))
-
     with app.test_request_context("/console/api/apps?page=1&limit=20", method="GET"):
-        response, status = method("tenant-1", "user-1", session)
+        response, status = method("tenant-1", "user-1", orm_session)
 
     assert status == 200
     assert response["data"][0]["has_draft_trigger"] is True
-    session.execute.assert_called_once()
-    scoped_session.execute.assert_not_called()
+    assert response["data"][1]["has_draft_trigger"] is False
     assert response["data"][0]["permission_keys"] == ["app.acl.edit"]
 
 
-def test_app_create_api_attaches_permission_keys(app, app_module):
+def test_app_create_api_attaches_permission_keys(
+    app: Flask,
+    app_module: ModuleType,
+    orm_session: Session,
+    bind_controller_db_sessions: scoped_session[Session],
+) -> None:
     method = app_module.AppListApi.post
     while hasattr(method, "__wrapped__"):
         method = method.__wrapped__
 
-    app_obj = SimpleNamespace(
-        id="app-new",
-        name="Created App",
-        description="Summary",
-        mode_compatible_with_agent="advanced-chat",
-        enable_site=True,
-        enable_api=True,
-        permission_keys=[],
-    )
+    app_obj = _app(app_id="app-new", name="Created App", mode=AppMode.ADVANCED_CHAT)
+
+    def create_app(_tenant_id, _params, _user, session: Session) -> App:
+        session.add(app_obj)
+        session.commit()
+        return app_obj
 
     with app.test_request_context("/apps", method="POST", json={}):
         with pytest.MonkeyPatch.context() as monkeypatch:
@@ -565,7 +655,7 @@ def test_app_create_api_attaches_permission_keys(app, app_module):
             monkeypatch.setattr(
                 app_module,
                 "AppService",
-                lambda: SimpleNamespace(create_app=lambda tenant_id, params, user, session: app_obj),
+                lambda: SimpleNamespace(create_app=create_app),
             )
             monkeypatch.setattr(
                 app_module.enterprise_rbac_service.RBACService.AppPermissions,
@@ -591,9 +681,18 @@ def test_app_create_api_attaches_permission_keys(app, app_module):
     assert resp["permission_keys"] == ["app.acl.view_layout", "app.acl.edit"]
     assert replace_whitelist.call_args.kwargs["payload"].scope is app_module.RBACResourceWhitelistScope.ALL
     initialize_rbac_task.delay.assert_called_once_with("tenant-1", "acct-1", "app-new")
+    orm_session.expire_all()
+    persisted_app = orm_session.get(App, "app-new")
+    assert persisted_app is not None
+    assert persisted_app.tenant_id == "tenant-1"
 
 
-def test_app_list_api_attaches_permission_keys(app, app_module):
+def test_app_list_api_attaches_permission_keys(
+    app: Flask,
+    app_module: ModuleType,
+    orm_session: Session,
+    bind_controller_db_sessions: scoped_session[Session],
+) -> None:
     method = app_module.AppListApi.get
     while hasattr(method, "__wrapped__"):
         method = method.__wrapped__
@@ -645,9 +744,7 @@ def test_app_list_api_attaches_permission_keys(app, app_module):
                 lambda tenant_id, account_id: SimpleNamespace(unrestricted=True, resource_ids=[]),
             )
 
-            session = MagicMock()
-            session.execute.return_value.scalars.return_value.all.return_value = []
-            resp, status = method(app_module.AppListApi(), "tenant-1", "acct-1", session)
+            resp, status = method(app_module.AppListApi(), "tenant-1", "acct-1", orm_session)
 
     assert status == 200
     params = get_paginate_apps.call_args.args[2]
@@ -656,7 +753,12 @@ def test_app_list_api_attaches_permission_keys(app, app_module):
     assert resp["data"][0]["permission_keys"] == ["app.acl.view_layout", "app.acl.edit"]
 
 
-def test_app_list_api_limits_to_apps_created_by_current_user_without_view_permission(app, app_module):
+def test_app_list_api_limits_to_apps_created_by_current_user_without_view_permission(
+    app: Flask,
+    app_module: ModuleType,
+    orm_session: Session,
+    bind_controller_db_sessions: scoped_session[Session],
+) -> None:
     method = app_module.AppListApi.get
     while hasattr(method, "__wrapped__"):
         method = method.__wrapped__
@@ -688,8 +790,7 @@ def test_app_list_api_limits_to_apps_created_by_current_user_without_view_permis
                 lambda: SimpleNamespace(webapp_auth=SimpleNamespace(enabled=False)),
             )
 
-            session = MagicMock()
-            resp, status = method(app_module.AppListApi(), "tenant-1", "acct-1", session)
+            resp, status = method(app_module.AppListApi(), "tenant-1", "acct-1", orm_session)
 
     assert status == 200
     assert resp["data"] == []
@@ -699,7 +800,12 @@ def test_app_list_api_limits_to_apps_created_by_current_user_without_view_permis
     assert params.is_created_by_me is None
 
 
-def test_app_list_api_limits_to_preview_overrides_without_manage_own_permission(app, app_module):
+def test_app_list_api_limits_to_preview_overrides_without_manage_own_permission(
+    app: Flask,
+    app_module: ModuleType,
+    orm_session: Session,
+    bind_controller_db_sessions: scoped_session[Session],
+) -> None:
     method = app_module.AppListApi.get
     while hasattr(method, "__wrapped__"):
         method = method.__wrapped__
@@ -746,8 +852,7 @@ def test_app_list_api_limits_to_preview_overrides_without_manage_own_permission(
                 lambda: SimpleNamespace(webapp_auth=SimpleNamespace(enabled=False)),
             )
 
-            session = MagicMock()
-            method(app_module.AppListApi(), "tenant-1", "acct-1", session)
+            method(app_module.AppListApi(), "tenant-1", "acct-1", orm_session)
 
     params = get_paginate_apps.call_args.args[2]
     assert params.accessible_app_ids == ["app-acl-shared", "app-full", "app-shared", "app-whitelist-only"]
@@ -755,7 +860,12 @@ def test_app_list_api_limits_to_preview_overrides_without_manage_own_permission(
     assert params.is_created_by_me is None
 
 
-def test_app_list_api_returns_no_apps_without_workspace_or_resource_view_permission(app, app_module):
+def test_app_list_api_returns_no_apps_without_workspace_or_resource_view_permission(
+    app: Flask,
+    app_module: ModuleType,
+    orm_session: Session,
+    bind_controller_db_sessions: scoped_session[Session],
+) -> None:
     method = app_module.AppListApi.get
     while hasattr(method, "__wrapped__"):
         method = method.__wrapped__
@@ -783,8 +893,7 @@ def test_app_list_api_returns_no_apps_without_workspace_or_resource_view_permiss
                 lambda: SimpleNamespace(webapp_auth=SimpleNamespace(enabled=False)),
             )
 
-            session = MagicMock()
-            method(app_module.AppListApi(), "tenant-1", "acct-1", session)
+            method(app_module.AppListApi(), "tenant-1", "acct-1", orm_session)
 
     params = get_paginate_apps.call_args.args[2]
     assert params.accessible_app_ids == ["app-not-permitted"]
@@ -792,20 +901,19 @@ def test_app_list_api_returns_no_apps_without_workspace_or_resource_view_permiss
     assert params.is_created_by_me is None
 
 
-def test_app_detail_api_attaches_current_user_permission_keys(app, app_module):
+def test_app_detail_api_attaches_current_user_permission_keys(
+    app: Flask,
+    app_module: ModuleType,
+    orm_session: Session,
+    bind_controller_db_sessions: scoped_session[Session],
+) -> None:
     method = app_module.AppApi.get
     while hasattr(method, "__wrapped__"):
         method = method.__wrapped__
 
-    app_obj = SimpleNamespace(
-        id="app-1",
-        name="Detail App",
-        description="Summary",
-        mode_compatible_with_agent="chat",
-        enable_site=True,
-        enable_api=True,
-        permission_keys=[],
-    )
+    app_obj = _app(app_id="app-1", name="Detail App", mode=AppMode.CHAT)
+    orm_session.add(app_obj)
+    orm_session.commit()
 
     with app.test_request_context("/apps/app-1"):
         with pytest.MonkeyPatch.context() as monkeypatch:
@@ -836,30 +944,36 @@ def test_app_detail_api_attaches_current_user_permission_keys(app, app_module):
 
             resp = method(app_module.AppApi(), "tenant-1", SimpleNamespace(id="acct-1"), app_model=app_obj)
 
-    get_permissions.assert_called_once_with("tenant-1", "acct-1", app_id="app-1", session=ANY)
     assert resp["permission_keys"] == ["app.acl.view_layout", "app.acl.edit", "app.acl.monitor"]
+    assert orm_session.get(App, "app-1") is app_obj
 
 
-def test_app_copy_api_attaches_permission_keys(app, app_module):
+def test_app_copy_api_attaches_permission_keys(
+    app: Flask,
+    app_module: ModuleType,
+    orm_session: Session,
+    bind_controller_db_sessions: scoped_session[Session],
+) -> None:
     method = app_module.AppCopyApi.post
     while hasattr(method, "__wrapped__"):
         method = method.__wrapped__
 
-    app_obj = SimpleNamespace(
-        id="app-new",
-        name="Copied App",
-        description="Summary",
-        mode_compatible_with_agent="workflow",
-        enable_site=True,
-        enable_api=True,
-        permission_keys=[],
-    )
+    original_app = _app(app_id="app-original", name="Original App")
+    copied_app = _app(app_id="app-new", name="Copied App")
+    orm_session.add(original_app)
+    orm_session.commit()
 
     import_result = SimpleNamespace(status=app_module.ImportStatus.COMPLETED, app_id="app-new")
-    fake_session = MagicMock()
-    fake_session.__enter__.return_value = fake_session
-    fake_session.__exit__.return_value = None
-    fake_session.scalar.return_value = app_obj
+
+    def app_dsl_service(session: Session):
+        def import_app(**_kwargs):
+            session.add(copied_app)
+            return import_result
+
+        return SimpleNamespace(
+            export_dsl=lambda **_kwargs: "dsl",
+            import_app=import_app,
+        )
 
     with app.test_request_context("/apps/app-original/copy", method="POST", json={}):
         with pytest.MonkeyPatch.context() as monkeypatch:
@@ -867,21 +981,12 @@ def test_app_copy_api_attaches_permission_keys(app, app_module):
             monkeypatch.setattr(
                 app_module,
                 "AppDslService",
-                lambda *_args, **_kwargs: SimpleNamespace(
-                    export_dsl=lambda **_kwargs: "dsl",
-                    import_app=lambda **_kwargs: import_result,
-                ),
+                app_dsl_service,
             )
             monkeypatch.setattr(
                 app_module.FeatureService,
                 "get_system_features",
                 lambda: SimpleNamespace(webapp_auth=SimpleNamespace(enabled=False)),
-            )
-            monkeypatch.setattr(app_module, "db", SimpleNamespace(engine=object(), session=lambda: MagicMock()))
-            monkeypatch.setattr(
-                app_module,
-                "Session",
-                lambda *_args, **_kwargs: fake_session,
             )
             monkeypatch.setattr(
                 app_module.enterprise_rbac_service.RBACService.AppPermissions,
@@ -893,9 +998,12 @@ def test_app_copy_api_attaches_permission_keys(app, app_module):
                 app_module.AppCopyApi(),
                 "tenant-1",
                 SimpleNamespace(id="acct-1"),
-                app_model=SimpleNamespace(id="app-original"),
+                app_model=original_app,
             )
 
     assert status == 201
-    assert fake_session.scalar.called
     assert resp["permission_keys"] == ["app.acl.view_layout", "app.acl.edit"]
+    orm_session.expire_all()
+    persisted_copy = orm_session.get(App, "app-new")
+    assert persisted_copy is not None
+    assert persisted_copy.tenant_id == "tenant-1"
