@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from inspect import unwrap
+from types import SimpleNamespace
 from unittest.mock import Mock, PropertyMock, patch
 
 import pytest
 from flask import Flask
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session
 from werkzeug.exceptions import NotFound
 
 from controllers.console import console_ns
@@ -256,7 +259,10 @@ class TestCustomizedPipelineTemplateApi:
         assert (response, status) == ("", 204)
         assert deleted_templates == [("template-1", tenant_id)]
 
-    def test_post_exports_yaml_from_orm_template(self, app: Flask) -> None:
+    @pytest.mark.parametrize("sqlite_session", [(PipelineCustomizedTemplate,)], indirect=True)
+    def test_post_exports_yaml_from_orm_template(
+        self, app: Flask, monkeypatch: pytest.MonkeyPatch, sqlite_engine: Engine, sqlite_session: Session
+    ) -> None:
         api = CustomizedPipelineTemplateApi()
         method = unwrap(api.post)
         template = PipelineCustomizedTemplate(
@@ -271,62 +277,27 @@ class TestCustomizedPipelineTemplateApi:
             language="en-US",
             created_by="00000000-0000-0000-0000-000000000002",
         )
+        template.id = "template-1"
+        sqlite_session.add(template)
+        sqlite_session.commit()
+        monkeypatch.setattr(module, "db", SimpleNamespace(engine=sqlite_engine))
 
-        class Session:
-            def scalar(self, stmt: object) -> PipelineCustomizedTemplate:
-                return template
-
-        class SessionContext:
-            def __enter__(self) -> Session:
-                return Session()
-
-            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-                return False
-
-        class SessionMaker:
-            def begin(self) -> SessionContext:
-                return SessionContext()
-
-        class Database:
-            engine = object()
-
-        with (
-            app.test_request_context("/rag/pipeline/customized/templates/template-1", method="POST"),
-            patch.object(module, "db", Database()),
-            patch.object(module, "sessionmaker", return_value=SessionMaker()),
-        ):
+        with app.test_request_context("/rag/pipeline/customized/templates/template-1", method="POST"):
             response, status = method(api, "template-1")
 
         assert status == 200
         assert response == {"data": "dsl: value"}
 
-    def test_post_raises_when_template_is_missing(self, app: Flask) -> None:
+    @pytest.mark.parametrize("sqlite_session", [(PipelineCustomizedTemplate,)], indirect=True)
+    def test_post_raises_when_template_is_missing(
+        self, app: Flask, monkeypatch: pytest.MonkeyPatch, sqlite_engine: Engine, sqlite_session: Session
+    ) -> None:
         api = CustomizedPipelineTemplateApi()
         method = unwrap(api.post)
+        assert sqlite_session.get(PipelineCustomizedTemplate, "missing") is None
+        monkeypatch.setattr(module, "db", SimpleNamespace(engine=sqlite_engine))
 
-        class Session:
-            def scalar(self, stmt: object) -> None:
-                return None
-
-        class SessionContext:
-            def __enter__(self) -> Session:
-                return Session()
-
-            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-                return False
-
-        class SessionMaker:
-            def begin(self) -> SessionContext:
-                return SessionContext()
-
-        class Database:
-            engine = object()
-
-        with (
-            app.test_request_context("/rag/pipeline/customized/templates/missing", method="POST"),
-            patch.object(module, "db", Database()),
-            patch.object(module, "sessionmaker", return_value=SessionMaker()),
-        ):
+        with app.test_request_context("/rag/pipeline/customized/templates/missing", method="POST"):
             with pytest.raises(ValueError, match="Customized pipeline template not found"):
                 method(api, "missing")
 
