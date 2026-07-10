@@ -6,11 +6,15 @@ in test_auth_wraps.py; handler tests use inspect.unwrap() to bypass them.
 """
 
 import inspect
-from unittest.mock import ANY, MagicMock, patch
+import uuid
+from collections.abc import Iterator
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from flask import Flask
 from pydantic import ValidationError
+from sqlalchemy import Engine, event
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from controllers.inner_api.app.dsl import (
     EnterpriseAppDSLExport,
@@ -18,8 +22,73 @@ from controllers.inner_api.app.dsl import (
     InnerAppDSLImportPayload,
     _get_active_account,
 )
-from models.account import AccountStatus
+from extensions.ext_database import db
+from models import Account, App
+from models.account import AccountStatus, Tenant, TenantAccountJoin, TenantAccountRole
+from models.base import TypeBase
+from models.model import AppMode, IconType
 from services.app_dsl_service import Import, ImportStatus
+
+
+@pytest.fixture
+def database_session(sqlite_engine: Engine) -> Iterator[Session]:
+    models = (Account, Tenant, TenantAccountJoin, App)
+    tables = [model.metadata.tables[model.__tablename__] for model in models]
+    TypeBase.metadata.create_all(sqlite_engine, tables=tables)
+    session_registry = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+
+    with (
+        patch.object(db, "session", session_registry),
+        patch.object(type(db), "engine", new_callable=PropertyMock, return_value=sqlite_engine),
+    ):
+        try:
+            yield session_registry()
+        finally:
+            session_registry.remove()
+
+
+def _persist_account(
+    session: Session,
+    *,
+    email: str,
+    status: AccountStatus = AccountStatus.ACTIVE,
+    with_workspace: bool = False,
+) -> tuple[Account, Tenant | None]:
+    account = Account(name="DSL Creator", email=email, status=status)
+    session.add(account)
+
+    tenant = None
+    if with_workspace:
+        tenant = Tenant(name="DSL Workspace")
+        session.add(tenant)
+        session.add(
+            TenantAccountJoin(
+                tenant_id=tenant.id,
+                account_id=account.id,
+                current=True,
+                role=TenantAccountRole.OWNER,
+            )
+        )
+
+    session.commit()
+    return account, tenant
+
+
+def _persist_app(session: Session) -> App:
+    app_model = App(
+        id=str(uuid.uuid4()),
+        tenant_id=str(uuid.uuid4()),
+        name="Exported App",
+        mode=AppMode.WORKFLOW,
+        icon_type=IconType.EMOJI,
+        icon="workflow",
+        icon_background="#FFFFFF",
+        enable_site=True,
+        enable_api=False,
+    )
+    session.add(app_model)
+    session.commit()
+    return app_model
 
 
 class TestInnerAppDSLImportPayload:
@@ -61,31 +130,24 @@ class TestInnerAppDSLImportPayload:
 class TestGetActiveAccount:
     """Test the _get_active_account helper function."""
 
-    @patch("controllers.inner_api.app.dsl.db")
-    def test_returns_active_account(self, mock_db):
-        mock_account = MagicMock()
-        mock_account.status = AccountStatus.ACTIVE
-        mock_db.session.scalar.return_value = mock_account
+    def test_returns_active_account(self, database_session: Session):
+        account, _ = _persist_account(database_session, email="user@example.com")
 
         result = _get_active_account("user@example.com")
 
-        assert result is mock_account
-        mock_db.session.scalar.assert_called_once()
+        assert result is not None
+        assert result.id == account.id
+        assert result.email == "user@example.com"
+        assert result.status == AccountStatus.ACTIVE
 
-    @patch("controllers.inner_api.app.dsl.db")
-    def test_returns_none_for_inactive_account(self, mock_db):
-        mock_account = MagicMock()
-        mock_account.status = AccountStatus.BANNED
-        mock_db.session.scalar.return_value = mock_account
+    def test_returns_none_for_inactive_account(self, database_session: Session):
+        _persist_account(database_session, email="banned@example.com", status=AccountStatus.BANNED)
 
         result = _get_active_account("banned@example.com")
 
         assert result is None
 
-    @patch("controllers.inner_api.app.dsl.db")
-    def test_returns_none_for_nonexistent_email(self, mock_db):
-        mock_db.session.scalar.return_value = None
-
+    def test_returns_none_for_nonexistent_email(self, database_session: Session):
         result = _get_active_account("missing@example.com")
 
         assert result is None
@@ -103,18 +165,20 @@ class TestEnterpriseAppDSLImport:
 
     @pytest.fixture
     def _mock_import_deps(self):
-        """Patch db, Session, and AppDslService for import handler tests."""
-        mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-        with (
-            patch("controllers.inner_api.app.dsl.db"),
-            patch("controllers.inner_api.app.dsl.Session", return_value=mock_session),
-            patch("controllers.inner_api.app.dsl.AppDslService") as mock_dsl_cls,
-        ):
-            self._mock_session = mock_session
+        """Patch the import service while retaining its real controller-owned session."""
+        with patch("controllers.inner_api.app.dsl.AppDslService") as mock_dsl_cls:
             self._mock_dsl = MagicMock()
-            mock_dsl_cls.return_value = self._mock_dsl
+            self._transaction_events: list[str] = []
+
+            def create_service(session: Session) -> MagicMock:
+                # The real service performs writes; begin explicitly so the controlled result still exercises
+                # the controller's commit/rollback branch on a live transaction.
+                session.begin()
+                event.listen(session, "after_commit", lambda _: self._transaction_events.append("commit"))
+                event.listen(session, "after_rollback", lambda _: self._transaction_events.append("rollback"))
+                return self._mock_dsl
+
+            mock_dsl_cls.side_effect = create_service
             yield
 
     def _make_import_result(self, status: ImportStatus, **kwargs) -> Import:
@@ -127,10 +191,13 @@ class TestEnterpriseAppDSLImport:
         return result
 
     @pytest.mark.usefixtures("_mock_import_deps")
-    @patch("controllers.inner_api.app.dsl._get_active_account")
-    def test_import_success_returns_200(self, mock_get_account, api_instance, app: Flask):
-        mock_account = MagicMock()
-        mock_get_account.return_value = mock_account
+    def test_import_success_returns_200(self, api_instance, app: Flask, database_session: Session):
+        _, tenant = _persist_account(
+            database_session,
+            email="user@example.com",
+            with_workspace=True,
+        )
+        assert tenant is not None
         self._mock_dsl.import_app.return_value = self._make_import_result(ImportStatus.COMPLETED)
 
         unwrapped = inspect.unwrap(api_instance.post)
@@ -140,58 +207,54 @@ class TestEnterpriseAppDSLImport:
                     "yaml_content": "version: 0.6.0\n",
                     "creator_email": "user@example.com",
                 }
-                result = unwrapped(api_instance, workspace_id="ws-123")
+                result = unwrapped(api_instance, workspace_id=tenant.id)
 
         body, status_code = result
         assert status_code == 200
         assert body["status"] == "completed"
-        mock_account.set_tenant_id.assert_called_once_with("ws-123")
-        self._mock_session.commit.assert_called_once_with()
-        self._mock_session.rollback.assert_not_called()
+        imported_account = self._mock_dsl.import_app.call_args.kwargs["account"]
+        assert isinstance(imported_account, Account)
+        assert imported_account.current_tenant_id == tenant.id
+        assert self._transaction_events == ["commit"]
 
     @pytest.mark.usefixtures("_mock_import_deps")
-    @patch("controllers.inner_api.app.dsl._get_active_account")
-    def test_import_pending_returns_202(self, mock_get_account, api_instance, app: Flask):
-        mock_get_account.return_value = MagicMock()
+    def test_import_pending_returns_202(self, api_instance, app: Flask, database_session: Session):
+        _, tenant = _persist_account(database_session, email="u@e.com", with_workspace=True)
+        assert tenant is not None
         self._mock_dsl.import_app.return_value = self._make_import_result(ImportStatus.PENDING)
 
         unwrapped = inspect.unwrap(api_instance.post)
         with app.test_request_context():
             with patch("controllers.inner_api.app.dsl.inner_api_ns") as mock_ns:
                 mock_ns.payload = {"yaml_content": "test", "creator_email": "u@e.com"}
-                body, status_code = unwrapped(api_instance, workspace_id="ws-123")
+                body, status_code = unwrapped(api_instance, workspace_id=tenant.id)
 
         assert status_code == 202
         assert body["status"] == "pending"
-        self._mock_session.commit.assert_called_once_with()
-        self._mock_session.rollback.assert_not_called()
+        assert self._transaction_events == ["commit"]
 
     @pytest.mark.usefixtures("_mock_import_deps")
-    @patch("controllers.inner_api.app.dsl._get_active_account")
-    def test_import_failed_returns_400(self, mock_get_account, api_instance, app: Flask):
-        mock_get_account.return_value = MagicMock()
+    def test_import_failed_returns_400(self, api_instance, app: Flask, database_session: Session):
+        _, tenant = _persist_account(database_session, email="u@e.com", with_workspace=True)
+        assert tenant is not None
         self._mock_dsl.import_app.return_value = self._make_import_result(ImportStatus.FAILED)
 
         unwrapped = inspect.unwrap(api_instance.post)
         with app.test_request_context():
             with patch("controllers.inner_api.app.dsl.inner_api_ns") as mock_ns:
                 mock_ns.payload = {"yaml_content": "test", "creator_email": "u@e.com"}
-                body, status_code = unwrapped(api_instance, workspace_id="ws-123")
+                body, status_code = unwrapped(api_instance, workspace_id=tenant.id)
 
         assert status_code == 400
         assert body["status"] == "failed"
-        self._mock_session.rollback.assert_called_once_with()
-        self._mock_session.commit.assert_not_called()
+        assert self._transaction_events == ["rollback"]
 
-    @patch("controllers.inner_api.app.dsl._get_active_account")
-    def test_import_account_not_found_returns_404(self, mock_get_account, api_instance, app: Flask):
-        mock_get_account.return_value = None
-
+    def test_import_account_not_found_returns_404(self, api_instance, app: Flask, database_session: Session):
         unwrapped = inspect.unwrap(api_instance.post)
         with app.test_request_context():
             with patch("controllers.inner_api.app.dsl.inner_api_ns") as mock_ns:
                 mock_ns.payload = {"yaml_content": "test", "creator_email": "missing@e.com"}
-                result = unwrapped(api_instance, workspace_id="ws-123")
+                result = unwrapped(api_instance, workspace_id=str(uuid.uuid4()))
 
         body, status_code = result
         assert status_code == 404
@@ -209,43 +272,44 @@ class TestEnterpriseAppDSLExport:
         return EnterpriseAppDSLExport()
 
     @patch("controllers.inner_api.app.dsl.AppDslService")
-    @patch("controllers.inner_api.app.dsl.db")
-    def test_export_success_returns_200(self, mock_db, mock_dsl_cls, api_instance, app: Flask):
-        mock_app = MagicMock()
-        mock_db.session.get.return_value = mock_app
+    def test_export_success_returns_200(self, mock_dsl_cls, api_instance, app: Flask, database_session: Session):
+        app_model = _persist_app(database_session)
         mock_dsl_cls.export_dsl.return_value = "version: 0.6.0\nkind: app\n"
 
         unwrapped = inspect.unwrap(api_instance.get)
         with app.test_request_context("?include_secret=false"):
-            result = unwrapped(api_instance, app_id="app-123")
+            result = unwrapped(api_instance, app_id=app_model.id)
 
         body, status_code = result
         assert status_code == 200
         assert body["data"] == "version: 0.6.0\nkind: app\n"
-        mock_dsl_cls.export_dsl.assert_called_once_with(app_model=mock_app, session=ANY, include_secret=False)
+        mock_dsl_cls.export_dsl.assert_called_once_with(
+            app_model=app_model,
+            session=database_session,
+            include_secret=False,
+        )
 
     @patch("controllers.inner_api.app.dsl.AppDslService")
-    @patch("controllers.inner_api.app.dsl.db")
-    def test_export_with_secret(self, mock_db, mock_dsl_cls, api_instance, app: Flask):
-        mock_app = MagicMock()
-        mock_db.session.get.return_value = mock_app
+    def test_export_with_secret(self, mock_dsl_cls, api_instance, app: Flask, database_session: Session):
+        app_model = _persist_app(database_session)
         mock_dsl_cls.export_dsl.return_value = "yaml-data"
 
         unwrapped = inspect.unwrap(api_instance.get)
         with app.test_request_context("?include_secret=true"):
-            result = unwrapped(api_instance, app_id="app-123")
+            result = unwrapped(api_instance, app_id=app_model.id)
 
         body, status_code = result
         assert status_code == 200
-        mock_dsl_cls.export_dsl.assert_called_once_with(app_model=mock_app, session=ANY, include_secret=True)
+        mock_dsl_cls.export_dsl.assert_called_once_with(
+            app_model=app_model,
+            session=database_session,
+            include_secret=True,
+        )
 
-    @patch("controllers.inner_api.app.dsl.db")
-    def test_export_app_not_found_returns_404(self, mock_db, api_instance, app: Flask):
-        mock_db.session.get.return_value = None
-
+    def test_export_app_not_found_returns_404(self, api_instance, app: Flask, database_session: Session):
         unwrapped = inspect.unwrap(api_instance.get)
         with app.test_request_context("?include_secret=false"):
-            result = unwrapped(api_instance, app_id="nonexistent")
+            result = unwrapped(api_instance, app_id=str(uuid.uuid4()))
 
         body, status_code = result
         assert status_code == 404
