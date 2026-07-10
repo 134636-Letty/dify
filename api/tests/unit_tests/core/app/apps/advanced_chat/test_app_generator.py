@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from constants import UUID_NIL
 from core.app.app_config.entities import AppAdditionalFeatures, WorkflowUIBasedAppConfig
+from core.app.apps import message_based_app_generator as message_based_app_generator_module
+from core.app.apps.advanced_chat import app_generator as app_generator_module
 from core.app.apps.advanced_chat.app_generator import AdvancedChatAppGenerator
 from core.app.apps.advanced_chat.generate_task_pipeline import (
     ConversationSnapshot,
@@ -20,8 +27,134 @@ from core.app.apps.exc import GenerateTaskStoppedError
 from core.app.entities.app_invoke_entities import AdvancedChatAppGenerateEntity, InvokeFrom
 from core.ops.ops_trace_manager import TraceQueueManager
 from libs.datetime_utils import naive_utc_now
-from models.enums import MessageStatus
-from models.model import AppMode
+from models.base import TypeBase
+from models.enums import ConversationFromSource, EndUserType, MessageStatus
+from models.model import App, AppMode, Conversation, EndUser, Message
+from models.workflow import Workflow, WorkflowType
+
+
+@dataclass(frozen=True)
+class _SQLiteDb:
+    engine: Engine
+    session: scoped_session[Session]
+
+
+@pytest.fixture
+def generator_db(sqlite_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[scoped_session[Session]]:
+    """Bind generator-owned and request-scoped sessions to an isolated SQLite database."""
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[
+            App.__table__,
+            Workflow.__table__,
+            EndUser.__table__,
+            Conversation.__table__,
+            Message.__table__,
+        ],
+    )
+    session_registry = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    sqlite_db = _SQLiteDb(engine=sqlite_engine, session=session_registry)
+    monkeypatch.setattr(app_generator_module, "db", sqlite_db)
+    monkeypatch.setattr(message_based_app_generator_module, "db", sqlite_db)
+    try:
+        yield session_registry
+    finally:
+        session_registry.remove()
+
+
+def _app(*, app_id: str = "app", tenant_id: str = "tenant") -> App:
+    return App(
+        id=app_id,
+        tenant_id=tenant_id,
+        name="Test App",
+        description="",
+        mode=AppMode.ADVANCED_CHAT,
+        enable_site=True,
+        enable_api=True,
+        max_active_requests=0,
+    )
+
+
+def _workflow(*, workflow_id: str = "workflow-id", app_id: str = "app", tenant_id: str = "tenant") -> Workflow:
+    return Workflow(
+        id=workflow_id,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        type=WorkflowType.CHAT,
+        version=Workflow.VERSION_DRAFT,
+        graph='{"nodes": [], "edges": []}',
+        features='{"feature": true}',
+        created_by="user",
+        environment_variables=[],
+        conversation_variables=[],
+        rag_pipeline_variables=[],
+    )
+
+
+def _end_user(*, user_id: str = "user", app_id: str = "app", tenant_id: str = "tenant") -> EndUser:
+    user = EndUser(
+        tenant_id=tenant_id,
+        app_id=app_id,
+        type=EndUserType.BROWSER,
+        name="Test User",
+        session_id=f"session-{user_id}",
+    )
+    user.id = user_id
+    return user
+
+
+def _conversation(*, conversation_id: str = "conv", app_id: str = "app", user_id: str = "user") -> Conversation:
+    conversation = Conversation(
+        app_id=app_id,
+        mode=AppMode.ADVANCED_CHAT,
+        name="Test Conversation",
+        status="normal",
+        from_source=ConversationFromSource.API,
+        from_end_user_id=user_id,
+        inputs={},
+    )
+    conversation.id = conversation_id
+    return conversation
+
+
+def _message(
+    *, message_id: str = "msg", conversation_id: str = "conv", app_id: str = "app", user_id: str = "user"
+) -> Message:
+    message = Message(
+        app_id=app_id,
+        conversation_id=conversation_id,
+        query="hello",
+        message={"role": "user", "content": "hello"},
+        answer="",
+        message_unit_price=Decimal(0),
+        answer_unit_price=Decimal(0),
+        currency="USD",
+        from_source=ConversationFromSource.API,
+        from_end_user_id=user_id,
+        app_mode=AppMode.ADVANCED_CHAT,
+        inputs={},
+    )
+    message.id = message_id
+    return message
+
+
+def _persist_worker_records(
+    session: Session,
+    *,
+    include_app: bool = True,
+    workflow_tenant_id: str = "tenant",
+    user_id: str = "internal-user",
+) -> tuple[Workflow, EndUser, Conversation, Message]:
+    workflow = _workflow(tenant_id=workflow_tenant_id)
+    end_user = _end_user(user_id=user_id)
+    conversation = _conversation(user_id=user_id)
+    message = _message(user_id=user_id)
+    records: list[object] = [workflow, end_user, conversation, message]
+    if include_app:
+        records.insert(0, _app())
+    session.add_all(records)
+    session.commit()
+    return workflow, end_user, conversation, message
 
 
 class TestAdvancedChatAppGeneratorValidation:
@@ -112,18 +245,38 @@ class TestAdvancedChatAppGeneratorInternals:
             workflow_id="workflow-id",
         )
 
-    def test_generate_loads_conversation_and_files(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_loads_conversation_and_files(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        generator_db: scoped_session[Session],
+        sqlite_engine: Engine,
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         app_config = self._build_app_config()
 
-        conversation = SimpleNamespace(id="conversation-id")
+        app = _app()
+        workflow = _workflow()
+        conversation = _conversation(conversation_id="conversation-id", user_id="user-id")
+        database_session = generator_db()
+        database_session.add_all([app, workflow, _end_user(user_id="user-id"), conversation])
+        database_session.commit()
         built_files: list[object] = []
         build_files_called = {"called": False}
         captured: dict[str, object] = {}
+        repository_engines: list[Engine] = []
+
+        def _get_conversation(**kwargs):
+            assert isinstance(kwargs["session"], Session)
+            return conversation
+
+        def _create_repository(**kwargs):
+            with kwargs["session_factory"]() as repository_session:
+                repository_engines.append(repository_session.get_bind())
+            return SimpleNamespace()
 
         monkeypatch.setattr(
             "core.app.apps.advanced_chat.app_generator.ConversationService.get_conversation",
-            lambda **kwargs: conversation,
+            _get_conversation,
         )
         monkeypatch.setattr(
             "core.app.apps.advanced_chat.app_generator.FileUploadConfigManager.convert",
@@ -139,18 +292,11 @@ class TestAdvancedChatAppGeneratorInternals:
         )
         monkeypatch.setattr(
             "core.app.apps.advanced_chat.app_generator.DifyCoreRepositoryFactory.create_workflow_execution_repository",
-            lambda **kwargs: SimpleNamespace(),
+            _create_repository,
         )
         monkeypatch.setattr(
             "core.app.apps.advanced_chat.app_generator.DifyCoreRepositoryFactory.create_workflow_node_execution_repository",
-            lambda **kwargs: SimpleNamespace(),
-        )
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=lambda: SimpleNamespace(close=lambda: None)),
-        )
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.sessionmaker", lambda **kwargs: SimpleNamespace()
+            _create_repository,
         )
         monkeypatch.setattr(generator, "_prepare_user_inputs", lambda **kwargs: kwargs["user_inputs"])
 
@@ -177,8 +323,8 @@ class TestAdvancedChatAppGeneratorInternals:
         user.id = "user-id"
 
         result = generator.generate(
-            app_model=SimpleNamespace(id="app", tenant_id="tenant"),
-            workflow=SimpleNamespace(features_dict={}),
+            app_model=app,
+            workflow=workflow,
             user=user,
             args={
                 "query": "hello",
@@ -195,6 +341,8 @@ class TestAdvancedChatAppGeneratorInternals:
         assert captured["conversation"] is conversation
         assert captured["application_generate_entity"].files == built_files
         assert build_files_called["called"] is True
+        assert isinstance(generator_db(), Session)
+        assert repository_engines == [sqlite_engine, sqlite_engine]
 
     def test_resume_delegates_to_generate(self, monkeypatch: pytest.MonkeyPatch):
         generator = AdvancedChatAppGenerator()
@@ -242,7 +390,9 @@ class TestAdvancedChatAppGeneratorInternals:
         assert captured_entity.trace_manager is existing_trace_manager
         assert captured_graph_runtime_state is not None
 
-    def test_single_iteration_generate_builds_debug_task(self, monkeypatch: pytest.MonkeyPatch):
+    def test_single_iteration_generate_builds_debug_task(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         app_config = self._build_app_config()
         captured: dict[str, object] = {}
@@ -263,17 +413,10 @@ class TestAdvancedChatAppGeneratorInternals:
             lambda **kwargs: SimpleNamespace(repo="node"),
         )
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.DraftVarLoader", lambda **kwargs: var_loader)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.sessionmaker", lambda **kwargs: SimpleNamespace()
-        )
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=lambda: SimpleNamespace()),
-        )
 
         class _DraftVarService:
             def __init__(self, session):
-                _ = session
+                assert isinstance(session, Session)
 
             def prefill_conversation_variable_default_values(self, workflow, user_id):
                 prefill_calls.append((workflow, user_id))
@@ -301,7 +444,9 @@ class TestAdvancedChatAppGeneratorInternals:
         assert captured["application_generate_entity"].single_iteration_run.node_id == "node-1"
         assert captured["application_generate_entity"].extras["trace_session_id"] == "session-1"
 
-    def test_single_loop_generate_builds_debug_task(self, monkeypatch: pytest.MonkeyPatch):
+    def test_single_loop_generate_builds_debug_task(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         app_config = self._build_app_config()
         captured: dict[str, object] = {}
@@ -322,17 +467,10 @@ class TestAdvancedChatAppGeneratorInternals:
             lambda **kwargs: SimpleNamespace(repo="node"),
         )
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.DraftVarLoader", lambda **kwargs: var_loader)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.sessionmaker", lambda **kwargs: SimpleNamespace()
-        )
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=lambda: SimpleNamespace()),
-        )
 
         class _DraftVarService:
             def __init__(self, session):
-                _ = session
+                assert isinstance(session, Session)
 
             def prefill_conversation_variable_default_values(self, workflow, user_id):
                 prefill_calls.append((workflow, user_id))
@@ -360,7 +498,12 @@ class TestAdvancedChatAppGeneratorInternals:
         assert captured["application_generate_entity"].single_loop_run.node_id == "node-2"
         assert captured["application_generate_entity"].extras["trace_session_id"] == "session-1"
 
-    def test_generate_internal_flow_initial_conversation_with_pause_layer(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_internal_flow_initial_conversation_with_pause_layer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        generator_db: scoped_session[Session],
+        sqlite_engine: Engine,
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         generator._dialogue_count = 0
         app_config = self._build_app_config()
@@ -379,20 +522,14 @@ class TestAdvancedChatAppGeneratorInternals:
             workflow_run_id="run-id",
         )
 
-        workflow = SimpleNamespace(id="wf-1", tenant_id="tenant", features={"feature": True}, features_dict={})
-        conversation = SimpleNamespace(id="conv-1", mode=AppMode.ADVANCED_CHAT, override_model_configs=None)
-        message = SimpleNamespace(
-            id="msg-1",
-            query="hello",
-            created_at=naive_utc_now(),
-            status=MessageStatus.NORMAL,
-            answer="",
-        )
-        db_session = SimpleNamespace(commit=MagicMock(), refresh=MagicMock(), close=MagicMock())
+        workflow = _workflow()
+        user = _end_user()
+        request_session = generator_db()
+        request_session.add_all([_app(), workflow, user])
+        request_session.commit()
         captured: dict[str, object] = {}
         thread_data: dict[str, object] = {}
 
-        monkeypatch.setattr(generator, "_init_generate_records", lambda *args: (conversation, message))
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.get_thread_messages_length", lambda _: 2)
         monkeypatch.setattr(
             "core.app.apps.advanced_chat.app_generator.MessageBasedAppQueueManager",
@@ -417,9 +554,6 @@ class TestAdvancedChatAppGeneratorInternals:
                 thread_data["started"] = True
 
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.threading.Thread", _Thread)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db", SimpleNamespace(engine=object(), session=db_session)
-        )
         monkeypatch.setattr(generator, "_get_draft_var_saver_factory", lambda *args, **kwargs: "draft-factory")
         monkeypatch.setattr(
             generator,
@@ -435,7 +569,7 @@ class TestAdvancedChatAppGeneratorInternals:
 
         response = generator._generate(
             workflow=workflow,
-            user=SimpleNamespace(id="user"),
+            user=user,
             invoke_from=InvokeFrom.WEB_APP,
             application_generate_entity=application_generate_entity,
             workflow_execution_repository=SimpleNamespace(),
@@ -450,15 +584,25 @@ class TestAdvancedChatAppGeneratorInternals:
         assert thread_data["started"] is True
         assert "pause-layer" in thread_data["kwargs"]["graph_engine_layers"]
         assert generator._dialogue_count == 3
-        db_session.commit.assert_called_once()
-        db_session.refresh.assert_called_once_with(conversation)
-        db_session.close.assert_called_once()
+        assert request_session.in_transaction() is False
         assert captured["draft_var_saver_factory"] == "draft-factory"
         assert isinstance(captured["workflow"], WorkflowSnapshot)
         assert isinstance(captured["conversation"], ConversationSnapshot)
         assert isinstance(captured["message"], MessageSnapshot)
+        with Session(sqlite_engine) as verification_session:
+            conversations = list(verification_session.scalars(select(Conversation)).all())
+            messages = list(verification_session.scalars(select(Message)).all())
+        assert len(conversations) == 1
+        assert conversations[0].override_model_configs == '{"feature": true}'
+        assert len(messages) == 1
+        assert messages[0].conversation_id == conversations[0].id
 
-    def test_generate_internal_flow_with_existing_records_skips_init(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_internal_flow_with_existing_records_skips_init(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        generator_db: scoped_session[Session],
+        sqlite_engine: Engine,
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         generator._dialogue_count = 0
         app_config = self._build_app_config()
@@ -477,16 +621,13 @@ class TestAdvancedChatAppGeneratorInternals:
             workflow_run_id="run-id",
         )
 
-        workflow = SimpleNamespace(id="wf-2", tenant_id="tenant", features={}, features_dict={})
-        conversation = SimpleNamespace(id="conv-2", mode=AppMode.ADVANCED_CHAT, override_model_configs=None)
-        message = SimpleNamespace(
-            id="msg-2",
-            query="hello",
-            created_at=naive_utc_now(),
-            status=MessageStatus.NORMAL,
-            answer="",
-        )
-        db_session = SimpleNamespace(close=MagicMock(), commit=MagicMock(), refresh=MagicMock())
+        workflow = _workflow(workflow_id="wf-2")
+        user = _end_user()
+        conversation = _conversation(conversation_id="conv-2")
+        message = _message(message_id="msg-2", conversation_id=conversation.id)
+        request_session = generator_db()
+        request_session.add_all([_app(), workflow, user, conversation, message])
+        request_session.commit()
         init_records = MagicMock()
         thread_data: dict[str, object] = {}
 
@@ -511,9 +652,6 @@ class TestAdvancedChatAppGeneratorInternals:
                 thread_data["started"] = True
 
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.threading.Thread", _Thread)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db", SimpleNamespace(engine=object(), session=db_session)
-        )
         monkeypatch.setattr(generator, "_get_draft_var_saver_factory", lambda *args, **kwargs: "draft-factory")
         monkeypatch.setattr(
             generator,
@@ -527,7 +665,7 @@ class TestAdvancedChatAppGeneratorInternals:
 
         response = generator._generate(
             workflow=workflow,
-            user=SimpleNamespace(id="user"),
+            user=user,
             invoke_from=InvokeFrom.WEB_APP,
             application_generate_entity=application_generate_entity,
             workflow_execution_repository=SimpleNamespace(),
@@ -540,11 +678,18 @@ class TestAdvancedChatAppGeneratorInternals:
         assert response == {"raw": True}
         init_records.assert_not_called()
         assert thread_data["started"] is True
-        db_session.commit.assert_not_called()
-        db_session.refresh.assert_not_called()
-        db_session.close.assert_called_once()
+        assert request_session.in_transaction() is False
+        with Session(sqlite_engine) as verification_session:
+            persisted_conversation = verification_session.get(Conversation, "conv-2")
+            persisted_message = verification_session.get(Message, "msg-2")
+        assert persisted_conversation is not None
+        assert persisted_conversation.override_model_configs is None
+        assert persisted_message is not None
+        assert persisted_message.conversation_id == "conv-2"
 
-    def test_generate_worker_raises_when_workflow_not_found(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_worker_raises_when_workflow_not_found(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         generator._dialogue_count = 1
         app_config = self._build_app_config()
@@ -563,30 +708,13 @@ class TestAdvancedChatAppGeneratorInternals:
             workflow_run_id="run-id",
         )
 
-        generator._get_conversation = MagicMock(return_value=SimpleNamespace(id="conv"))
-        generator._get_message = MagicMock(return_value=SimpleNamespace(id="msg"))
+        workflow, _, _, _ = _persist_worker_records(generator_db(), workflow_tenant_id="other-tenant")
 
         @contextmanager
         def _fake_context(*args, **kwargs):
             yield
 
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.preserve_flask_contexts", _fake_context)
-
-        class _Session:
-            def __init__(self, *args, **kwargs):
-                self.scalar = MagicMock(return_value=None)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-        monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.Session", _Session)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=SimpleNamespace(close=lambda: None)),
-        )
 
         with pytest.raises(ValueError, match="Workflow not found"):
             generator._generate_worker(
@@ -602,8 +730,12 @@ class TestAdvancedChatAppGeneratorInternals:
                 graph_engine_layers=(),
                 graph_runtime_state=None,
             )
+        assert workflow.id == "workflow-id"
+        assert workflow.tenant_id == "other-tenant"
 
-    def test_generate_worker_raises_when_app_not_found_for_internal_call(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_worker_raises_when_app_not_found_for_internal_call(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         generator._dialogue_count = 1
         app_config = self._build_app_config()
@@ -622,35 +754,13 @@ class TestAdvancedChatAppGeneratorInternals:
             workflow_run_id="run-id",
         )
 
-        generator._get_conversation = MagicMock(return_value=SimpleNamespace(id="conv"))
-        generator._get_message = MagicMock(return_value=SimpleNamespace(id="msg"))
+        _persist_worker_records(generator_db(), include_app=False)
 
         @contextmanager
         def _fake_context(*args, **kwargs):
             yield
 
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.preserve_flask_contexts", _fake_context)
-
-        class _Session:
-            def __init__(self, *args, **kwargs):
-                self.scalar = MagicMock(
-                    side_effect=[
-                        SimpleNamespace(id="workflow-id", tenant_id="tenant", app_id="app"),
-                        None,
-                    ]
-                )
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-        monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.Session", _Session)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=SimpleNamespace(close=lambda: None)),
-        )
 
         with pytest.raises(ValueError, match="App not found"):
             generator._generate_worker(
@@ -667,7 +777,9 @@ class TestAdvancedChatAppGeneratorInternals:
                 graph_runtime_state=None,
             )
 
-    def test_generate_worker_handles_stopped_error(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_worker_handles_stopped_error(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         generator._dialogue_count = 1
         app_config = self._build_app_config()
@@ -687,29 +799,13 @@ class TestAdvancedChatAppGeneratorInternals:
         )
 
         queue_manager = MagicMock()
-        generator._get_conversation = MagicMock(return_value=SimpleNamespace(id="conv"))
-        generator._get_message = MagicMock(return_value=SimpleNamespace(id="msg"))
+        _persist_worker_records(generator_db())
 
         @contextmanager
         def _fake_context(*args, **kwargs):
             yield
 
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.preserve_flask_contexts", _fake_context)
-
-        class _Session:
-            def __init__(self, *args, **kwargs):
-                self.scalar = MagicMock(
-                    side_effect=[
-                        SimpleNamespace(id="workflow-id", tenant_id="tenant", app_id="app"),
-                        SimpleNamespace(id="app"),
-                    ]
-                )
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
 
         class _Runner:
             def __init__(self, **kwargs):
@@ -718,12 +814,7 @@ class TestAdvancedChatAppGeneratorInternals:
             def run(self):
                 raise GenerateTaskStoppedError()
 
-        monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.Session", _Session)
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.AdvancedChatAppRunner", _Runner)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=SimpleNamespace(close=lambda: None)),
-        )
 
         generator._generate_worker(
             flask_app=SimpleNamespace(),
@@ -741,7 +832,9 @@ class TestAdvancedChatAppGeneratorInternals:
 
         queue_manager.publish_error.assert_not_called()
 
-    def test_generate_worker_handles_validation_error(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_worker_handles_validation_error(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         generator._dialogue_count = 1
         app_config = self._build_app_config()
@@ -771,29 +864,13 @@ class TestAdvancedChatAppGeneratorInternals:
             raise AssertionError("validation error should be created")
 
         queue_manager = MagicMock()
-        generator._get_conversation = MagicMock(return_value=SimpleNamespace(id="conv"))
-        generator._get_message = MagicMock(return_value=SimpleNamespace(id="msg"))
+        _persist_worker_records(generator_db())
 
         @contextmanager
         def _fake_context(*args, **kwargs):
             yield
 
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.preserve_flask_contexts", _fake_context)
-
-        class _Session:
-            def __init__(self, *args, **kwargs):
-                self.scalar = MagicMock(
-                    side_effect=[
-                        SimpleNamespace(id="workflow-id", tenant_id="tenant", app_id="app"),
-                        SimpleNamespace(id="app"),
-                    ]
-                )
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
 
         class _Runner:
             def __init__(self, **kwargs):
@@ -802,12 +879,7 @@ class TestAdvancedChatAppGeneratorInternals:
             def run(self):
                 raise validation_error
 
-        monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.Session", _Session)
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.AdvancedChatAppRunner", _Runner)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=SimpleNamespace(close=lambda: None)),
-        )
 
         generator._generate_worker(
             flask_app=SimpleNamespace(),
@@ -825,8 +897,11 @@ class TestAdvancedChatAppGeneratorInternals:
 
         queue_manager.publish_error.assert_called_once()
 
-    def test_generate_worker_handles_value_and_unknown_errors(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_worker_handles_value_and_unknown_errors(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         app_config = self._build_app_config()
+        _persist_worker_records(generator_db())
 
         @contextmanager
         def _fake_context(*args, **kwargs):
@@ -860,35 +935,13 @@ class TestAdvancedChatAppGeneratorInternals:
             )
 
             queue_manager = MagicMock()
-            generator._get_conversation = MagicMock(return_value=SimpleNamespace(id="conv"))
-            generator._get_message = MagicMock(return_value=SimpleNamespace(id="msg"))
-
-            class _Session:
-                def __init__(self, *args, **kwargs):
-                    self.scalar = MagicMock(
-                        side_effect=[
-                            SimpleNamespace(id="workflow-id", tenant_id="tenant", app_id="app"),
-                            SimpleNamespace(id="app"),
-                        ]
-                    )
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, exc_type, exc, tb):
-                    return False
 
             monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.preserve_flask_contexts", _fake_context)
-            monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.Session", _Session)
             monkeypatch.setattr(
                 "core.app.apps.advanced_chat.app_generator.AdvancedChatAppRunner",
                 _make_runner(raised_error),
             )
             monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.dify_config", SimpleNamespace(DEBUG=True))
-            monkeypatch.setattr(
-                "core.app.apps.advanced_chat.app_generator.db",
-                SimpleNamespace(engine=object(), session=SimpleNamespace(close=lambda: None)),
-            )
 
             generator._generate_worker(
                 flask_app=SimpleNamespace(),
@@ -1012,7 +1065,9 @@ class TestAdvancedChatAppGeneratorInternals:
 
         assert "Failed to process generate task pipeline, conversation_id: conv" in caplog.messages
 
-    def test_generate_worker_handles_invoke_auth_error(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_worker_handles_invoke_auth_error(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
         generator._dialogue_count = 1
 
@@ -1039,13 +1094,12 @@ class TestAdvancedChatAppGeneratorInternals:
         )
 
         queue_manager = MagicMock()
-
-        generator._get_conversation = MagicMock(return_value=SimpleNamespace(id="conv", mode=AppMode.ADVANCED_CHAT))
-        generator._get_message = MagicMock(return_value=SimpleNamespace(id="msg"))
+        _, end_user, _, _ = _persist_worker_records(generator_db(), user_id="end-user-id")
+        runner_kwargs: dict[str, object] = {}
 
         class _Runner:
             def __init__(self, **kwargs) -> None:
-                _ = kwargs
+                runner_kwargs.update(kwargs)
 
             def run(self):
                 from graphon.model_runtime.errors.invoke import InvokeAuthorizationError
@@ -1059,28 +1113,6 @@ class TestAdvancedChatAppGeneratorInternals:
             yield
 
         monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.preserve_flask_contexts", _fake_context)
-
-        class _Session:
-            def __init__(self, *args, **kwargs):
-                self.scalar = MagicMock(
-                    side_effect=[
-                        SimpleNamespace(id="workflow-id", tenant_id="tenant", app_id="app"),
-                        SimpleNamespace(id="end-user-id", session_id="session-id"),
-                        SimpleNamespace(id="app"),
-                    ]
-                )
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-        monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.Session", _Session)
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=SimpleNamespace(close=lambda: None)),
-        )
 
         generator._generate_worker(
             flask_app=SimpleNamespace(),
@@ -1097,8 +1129,15 @@ class TestAdvancedChatAppGeneratorInternals:
         )
 
         assert queue_manager.publish_error.called
+        assert runner_kwargs["system_user_id"] == end_user.session_id
+        assert isinstance(runner_kwargs["app"], App)
+        assert isinstance(runner_kwargs["workflow"], Workflow)
+        assert isinstance(runner_kwargs["conversation"], Conversation)
+        assert isinstance(runner_kwargs["message"], Message)
 
-    def test_generate_debugger_enables_retrieve_source(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_debugger_enables_retrieve_source(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
 
         app_config = WorkflowUIBasedAppConfig(
@@ -1139,15 +1178,6 @@ class TestAdvancedChatAppGeneratorInternals:
             "core.app.apps.advanced_chat.app_generator.DifyCoreRepositoryFactory.create_workflow_node_execution_repository",
             lambda **kwargs: SimpleNamespace(),
         )
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=SimpleNamespace(close=lambda: None)),
-        )
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.sessionmaker",
-            lambda **kwargs: SimpleNamespace(),
-        )
-
         captured = {}
 
         def _fake_generate(**kwargs):
@@ -1177,7 +1207,9 @@ class TestAdvancedChatAppGeneratorInternals:
         assert app_config.additional_features.show_retrieve_source is True
         assert captured["application_generate_entity"].query == "hello"
 
-    def test_generate_service_api_sets_parent_message_id(self, monkeypatch: pytest.MonkeyPatch):
+    def test_generate_service_api_sets_parent_message_id(
+        self, monkeypatch: pytest.MonkeyPatch, generator_db: scoped_session[Session]
+    ) -> None:
         generator = AdvancedChatAppGenerator()
 
         app_config = WorkflowUIBasedAppConfig(
@@ -1218,15 +1250,6 @@ class TestAdvancedChatAppGeneratorInternals:
             "core.app.apps.advanced_chat.app_generator.DifyCoreRepositoryFactory.create_workflow_node_execution_repository",
             lambda **kwargs: SimpleNamespace(),
         )
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.db",
-            SimpleNamespace(engine=object(), session=SimpleNamespace(close=lambda: None)),
-        )
-        monkeypatch.setattr(
-            "core.app.apps.advanced_chat.app_generator.sessionmaker",
-            lambda **kwargs: SimpleNamespace(),
-        )
-
         captured = {}
 
         def _fake_generate(**kwargs):
