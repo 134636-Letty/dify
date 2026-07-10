@@ -4,6 +4,7 @@ import time
 import click
 from celery import shared_task
 from sqlalchemy import delete, select
+from sqlalchemy.orm import Session, sessionmaker
 
 from core.db.session_factory import session_factory
 from core.rag.index_processor.index_processor_factory import IndexProcessorFactory
@@ -38,6 +39,8 @@ def clean_dataset_task(
     collection_binding_id: str,
     doc_form: str,
     pipeline_id: str | None = None,
+    *,
+    session_maker: sessionmaker[Session] | None = None,
 ):
     """
     Clean dataset when dataset deleted.
@@ -47,13 +50,15 @@ def clean_dataset_task(
     :param index_struct: index struct dict
     :param collection_binding_id: collection binding id
     :param doc_form: dataset form
+    :param session_maker: optional session factory for the task-owned transaction
 
     Usage: clean_dataset_task.delay(dataset_id, tenant_id, indexing_technique, index_struct)
     """
     logger.info(click.style(f"Start clean dataset when dataset deleted: {dataset_id}", fg="green"))
     start_at = time.perf_counter()
 
-    with session_factory.create_session() as session:
+    resolved_session_maker = session_maker or session_factory.get_session_maker()
+    with resolved_session_maker() as session:
         try:
             dataset = Dataset(
                 id=dataset_id,
