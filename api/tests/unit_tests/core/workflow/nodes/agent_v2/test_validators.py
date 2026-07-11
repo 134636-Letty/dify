@@ -1,88 +1,52 @@
+"""SQLite-backed tests for Agent v2 workflow validators.
+
+Validation resolves a node binding, its tenant-scoped Agent, and the selected
+immutable config snapshot before checking graph and job configuration.  These
+tests persist that lookup graph (including tenant/node decoys) so query scope,
+empty results, and binding uniqueness are exercised by SQLAlchemy itself.
+"""
+
+import datetime
 import json
-from types import SimpleNamespace
-from unittest.mock import Mock
+from collections.abc import Iterator
+from dataclasses import dataclass
+from uuid import uuid4
 
 import pytest
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
 
 from core.workflow.nodes.agent_v2.validators import (
     WorkflowAgentNodeValidationError,
     WorkflowAgentNodeValidator,
 )
-from models.agent import Agent, AgentConfigSnapshot, AgentStatus, WorkflowAgentBindingType, WorkflowAgentNodeBinding
+from extensions.storage.storage_type import StorageType
+from models.agent import (
+    Agent,
+    AgentConfigSnapshot,
+    AgentScope,
+    AgentSource,
+    AgentStatus,
+    WorkflowAgentBindingType,
+    WorkflowAgentNodeBinding,
+)
 from models.agent_config_entities import AgentSoulConfig, AgentSoulModelConfig, WorkflowNodeJobConfig
+from models.base import TypeBase
+from models.enums import CreatorUserRole
+from models.model import UploadFile
 from models.workflow import Workflow
 
 
-def _workflow(graph: dict) -> Workflow:
-    return Workflow(
-        id="workflow-1",
-        tenant_id="tenant-1",
-        app_id="app-1",
-        graph=json.dumps(graph),
+def _model_config() -> AgentSoulModelConfig:
+    return AgentSoulModelConfig(
+        plugin_id="langgenius/openai",
+        model_provider="openai",
+        model="gpt-test",
     )
 
 
-def _binding(node_job: WorkflowNodeJobConfig) -> WorkflowAgentNodeBinding:
-    return WorkflowAgentNodeBinding(
-        id="binding-1",
-        tenant_id="tenant-1",
-        app_id="app-1",
-        workflow_id="workflow-1",
-        node_id="agent-node",
-        agent_id="agent-1",
-        current_snapshot_id="snapshot-1",
-        node_job_config=node_job,
-    )
-
-
-def _agent() -> Agent:
-    return Agent(id="agent-1", tenant_id="tenant-1", name="Agent", status=AgentStatus.ACTIVE)
-
-
-def _snapshot() -> AgentConfigSnapshot:
-    return AgentConfigSnapshot(
-        id="snapshot-1",
-        tenant_id="tenant-1",
-        agent_id="agent-1",
-        version=1,
-        config_snapshot=AgentSoulConfig(
-            model=AgentSoulModelConfig(
-                plugin_id="langgenius/openai",
-                model_provider="openai",
-                model="gpt-test",
-            )
-        ),
-    )
-
-
-def _snapshot_with_knowledge_dataset(dataset_id: str) -> AgentConfigSnapshot:
-    return AgentConfigSnapshot(
-        id="snapshot-1",
-        tenant_id="tenant-1",
-        agent_id="agent-1",
-        version=1,
-        config_snapshot=AgentSoulConfig(
-            model=AgentSoulModelConfig(
-                plugin_id="langgenius/openai",
-                model_provider="openai",
-                model="gpt-test",
-            ),
-            knowledge={
-                "sets": [
-                    {
-                        "id": "support",
-                        "name": "Support KB",
-                        "datasets": [{"id": dataset_id}],
-                        "query": {"mode": "generated_query"},
-                        "retrieval": {"mode": "multiple", "top_k": 4},
-                    }
-                ]
-            },
-        ),
-    )
-
-
-def _graph(edges: list[dict]) -> dict:
+def _graph(edges: list[dict[str, str]]) -> dict[str, object]:
     return {
         "nodes": [
             {"id": "start", "data": {"type": "start"}},
@@ -94,7 +58,7 @@ def _graph(edges: list[dict]) -> dict:
     }
 
 
-def _tool_graph(tool_data: dict) -> dict:
+def _tool_graph(tool_data: dict[str, object]) -> dict[str, object]:
     return {
         "nodes": [
             {"id": "start", "data": {"type": "start"}},
@@ -118,498 +82,484 @@ def _tool_graph(tool_data: dict) -> dict:
     }
 
 
-def test_publish_validation_accepts_upstream_previous_output_ref():
-    node_job = WorkflowNodeJobConfig.model_validate(
-        {"previous_node_output_refs": [{"node_id": "previous-node", "output": "text"}]}
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot()]
+@dataclass
+class ValidatorDatabase:
+    """Owns one real session and identifiers for the target validation graph."""
 
-    WorkflowAgentNodeValidator.validate_published_workflow(
-        session=session,
-        workflow=_workflow(
-            _graph(
-                [
-                    {"source": "start", "target": "previous-node"},
-                    {"source": "previous-node", "target": "agent-node"},
-                ]
+    session: Session
+    tenant_id: str
+    app_id: str
+    workflow_id: str
+    agent_id: str
+    snapshot_id: str
+    binding_id: str
+
+    def workflow(self, graph: dict[str, object] | None = None) -> Workflow:
+        return Workflow(
+            id=self.workflow_id,
+            tenant_id=self.tenant_id,
+            app_id=self.app_id,
+            graph=json.dumps(graph or _graph([{"source": "start", "target": "agent-node"}])),
+        )
+
+    def persist(
+        self,
+        *,
+        node_job: WorkflowNodeJobConfig | None = None,
+        soul: AgentSoulConfig | None = None,
+        binding_type: WorkflowAgentBindingType = WorkflowAgentBindingType.INLINE_AGENT,
+        agent_status: AgentStatus = AgentStatus.ACTIVE,
+        add_agent: bool = True,
+        add_snapshot: bool = True,
+        current_snapshot_id: str | None = None,
+        active_snapshot_id: str | None = None,
+    ) -> None:
+        selected_snapshot_id = active_snapshot_id or self.snapshot_id
+        if add_agent:
+            self.session.add(
+                Agent(
+                    id=self.agent_id,
+                    tenant_id=self.tenant_id,
+                    name="Validator Agent",
+                    description="",
+                    role="",
+                    scope=AgentScope.ROSTER
+                    if binding_type == WorkflowAgentBindingType.ROSTER_AGENT
+                    else AgentScope.WORKFLOW_ONLY,
+                    source=AgentSource.WORKFLOW,
+                    workflow_id=self.workflow_id,
+                    workflow_node_id="agent-node",
+                    active_config_snapshot_id=selected_snapshot_id,
+                    status=agent_status,
+                )
             )
+        if add_snapshot:
+            self.session.add(
+                AgentConfigSnapshot(
+                    id=selected_snapshot_id,
+                    tenant_id=self.tenant_id,
+                    agent_id=self.agent_id,
+                    version=1,
+                    config_snapshot=soul or AgentSoulConfig(model=_model_config()),
+                )
+            )
+        self.session.add(
+            WorkflowAgentNodeBinding(
+                id=self.binding_id,
+                tenant_id=self.tenant_id,
+                app_id=self.app_id,
+                workflow_id=self.workflow_id,
+                workflow_version="1",
+                node_id="agent-node",
+                binding_type=binding_type,
+                agent_id=self.agent_id,
+                current_snapshot_id=current_snapshot_id or self.snapshot_id,
+                node_job_config=node_job or WorkflowNodeJobConfig(),
+            )
+        )
+        self.session.commit()
+
+    def add_upload(self, *, tenant_id: str | None = None) -> str:
+        upload = UploadFile(
+            tenant_id=tenant_id or self.tenant_id,
+            storage_type=StorageType.LOCAL,
+            key="validator-file",
+            name="benchmark.txt",
+            size=10,
+            extension="txt",
+            mime_type="text/plain",
+            created_by_role=CreatorUserRole.ACCOUNT,
+            created_by=str(uuid4()),
+            created_at=datetime.datetime.now(datetime.UTC),
+            used=False,
+        )
+        self.session.add(upload)
+        self.session.commit()
+        return upload.id
+
+
+@pytest.fixture
+def validator_db(sqlite_engine: Engine) -> Iterator[ValidatorDatabase]:
+    """Create only validator tables and persist query-scope decoys."""
+
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[
+            Agent.__table__,
+            AgentConfigSnapshot.__table__,
+            WorkflowAgentNodeBinding.__table__,
+            UploadFile.__table__,
+        ],
+    )
+    maker = sessionmaker(bind=sqlite_engine, expire_on_commit=False)
+    with maker() as session:
+        database = ValidatorDatabase(
+            session=session,
+            tenant_id=str(uuid4()),
+            app_id=str(uuid4()),
+            workflow_id=str(uuid4()),
+            agent_id=str(uuid4()),
+            snapshot_id=str(uuid4()),
+            binding_id=str(uuid4()),
+        )
+        # Same app/workflow/node shape in another tenant and another node in the
+        # target tenant ensure _find_binding cannot succeed without full scope.
+        decoy_tenant = str(uuid4())
+        session.add_all(
+            [
+                WorkflowAgentNodeBinding(
+                    tenant_id=decoy_tenant,
+                    app_id=database.app_id,
+                    workflow_id=database.workflow_id,
+                    workflow_version="1",
+                    node_id="agent-node",
+                    binding_type=WorkflowAgentBindingType.INLINE_AGENT,
+                    agent_id=str(uuid4()),
+                    current_snapshot_id=str(uuid4()),
+                    node_job_config=WorkflowNodeJobConfig(),
+                ),
+                WorkflowAgentNodeBinding(
+                    tenant_id=database.tenant_id,
+                    app_id=database.app_id,
+                    workflow_id=database.workflow_id,
+                    workflow_version="1",
+                    node_id="other-node",
+                    binding_type=WorkflowAgentBindingType.INLINE_AGENT,
+                    agent_id=str(uuid4()),
+                    current_snapshot_id=str(uuid4()),
+                    node_job_config=WorkflowNodeJobConfig(),
+                ),
+            ]
+        )
+        session.commit()
+        yield database
+
+
+def _validate(database: ValidatorDatabase, graph: dict[str, object] | None = None) -> None:
+    WorkflowAgentNodeValidator.validate_published_workflow(
+        session=database.session,
+        workflow=database.workflow(graph),
+    )
+
+
+def test_publish_accepts_upstream_previous_output_ref(validator_db: ValidatorDatabase) -> None:
+    validator_db.persist(
+        node_job=WorkflowNodeJobConfig.model_validate(
+            {"previous_node_output_refs": [{"node_id": "previous-node", "output": "text"}]}
+        )
+    )
+
+    _validate(
+        validator_db,
+        _graph(
+            [
+                {"source": "start", "target": "previous-node"},
+                {"source": "previous-node", "target": "agent-node"},
+            ]
         ),
     )
 
 
-def test_publish_validation_uses_active_snapshot_for_roster_agent():
-    node_job = WorkflowNodeJobConfig()
-    binding = _binding(node_job)
-    binding.binding_type = WorkflowAgentBindingType.ROSTER_AGENT
-    binding.current_snapshot_id = "old-snapshot"
-    agent = _agent()
-    agent.active_config_snapshot_id = "active-snapshot"
-    snapshot = _snapshot()
-    snapshot.id = "active-snapshot"
-    session = Mock()
-    session.scalar.side_effect = [binding, agent, snapshot]
-
-    WorkflowAgentNodeValidator.validate_published_workflow(
-        session=session,
-        workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
+def test_roster_binding_uses_agent_active_snapshot(validator_db: ValidatorDatabase) -> None:
+    active_snapshot_id = str(uuid4())
+    validator_db.persist(
+        binding_type=WorkflowAgentBindingType.ROSTER_AGENT,
+        current_snapshot_id=str(uuid4()),
+        active_snapshot_id=active_snapshot_id,
     )
 
-
-def test_publish_validation_rejects_non_upstream_previous_output_ref():
-    node_job = WorkflowNodeJobConfig.model_validate(
-        {"previous_node_output_refs": [{"node_id": "later-node", "output": "text"}]}
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot()]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="non-upstream"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(
-                _graph(
-                    [
-                        {"source": "start", "target": "agent-node"},
-                        {"source": "agent-node", "target": "later-node"},
-                    ]
-                )
-            ),
-        )
+    _validate(validator_db)
+    assert validator_db.session.get(AgentConfigSnapshot, active_snapshot_id) is not None
 
 
-def test_draft_validation_allows_unbound_agent_node():
-    session = Mock()
-    session.scalar.return_value = None
+@pytest.mark.parametrize(
+    ("ref", "edges", "message"),
+    [
+        (
+            {"node_id": "later-node", "output": "text"},
+            [{"source": "start", "target": "agent-node"}, {"source": "agent-node", "target": "later-node"}],
+            "non-upstream",
+        ),
+        ({"node_id": "missing-node", "output": "text"}, [{"source": "start", "target": "agent-node"}], "missing"),
+        ({"node_id": "agent-node", "output": "text"}, [{"source": "start", "target": "agent-node"}], "non-upstream"),
+    ],
+)
+def test_publish_rejects_invalid_previous_output_refs(
+    validator_db: ValidatorDatabase,
+    ref: dict[str, str],
+    edges: list[dict[str, str]],
+    message: str,
+) -> None:
+    validator_db.persist(node_job=WorkflowNodeJobConfig.model_validate({"previous_node_output_refs": [ref]}))
 
-    WorkflowAgentNodeValidator.validate_draft_workflow(
-        session=session,
-        workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-    )
+    with pytest.raises(WorkflowAgentNodeValidationError, match=message):
+        _validate(validator_db, _graph(edges))
 
 
-def test_publish_validation_requires_binding():
-    session = Mock()
-    session.scalar.return_value = None
+def test_empty_binding_is_allowed_for_draft_but_rejected_for_publish(validator_db: ValidatorDatabase) -> None:
+    workflow = validator_db.workflow()
 
+    WorkflowAgentNodeValidator.validate_draft_workflow(session=validator_db.session, workflow=workflow)
     with pytest.raises(WorkflowAgentNodeValidationError, match="requires a binding"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
+        WorkflowAgentNodeValidator.validate_published_workflow(session=validator_db.session, workflow=workflow)
 
 
-def test_publish_validation_rejects_duplicate_output_names():
-    node_job = WorkflowNodeJobConfig.model_validate(
-        {
-            "declared_outputs": [
-                {"name": "summary", "type": "string"},
-                {"name": "summary", "type": "number"},
-            ]
-        }
+@pytest.mark.parametrize("empty_state", ["agent", "archived", "snapshot"])
+def test_publish_rejects_unavailable_persisted_dependencies(validator_db: ValidatorDatabase, empty_state: str) -> None:
+    validator_db.persist(
+        add_agent=empty_state != "agent",
+        agent_status=AgentStatus.ARCHIVED if empty_state == "archived" else AgentStatus.ACTIVE,
+        add_snapshot=empty_state != "snapshot",
     )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot()]
+
+    message = "unavailable agent" if empty_state in {"agent", "archived"} else "missing config snapshot"
+    with pytest.raises(WorkflowAgentNodeValidationError, match=message):
+        _validate(validator_db)
+
+
+def test_publish_rejects_duplicate_output_names(validator_db: ValidatorDatabase) -> None:
+    validator_db.persist(
+        node_job=WorkflowNodeJobConfig.model_validate(
+            {"declared_outputs": [{"name": "summary", "type": "string"}, {"name": "summary", "type": "number"}]}
+        )
+    )
 
     with pytest.raises(WorkflowAgentNodeValidationError, match="duplicate output name"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
+        _validate(validator_db)
 
 
-def test_publish_validation_rejects_missing_agent_soul_model():
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = AgentConfigSnapshot(
-        id="snapshot-1",
-        tenant_id="tenant-1",
-        agent_id="agent-1",
-        version=1,
-        config_snapshot=AgentSoulConfig(),
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
+def test_publish_rejects_snapshot_without_soul_model(validator_db: ValidatorDatabase) -> None:
+    validator_db.persist(soul=AgentSoulConfig())
 
     with pytest.raises(WorkflowAgentNodeValidationError, match="requires Agent Soul model"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
+        _validate(validator_db)
 
 
-def test_publish_validation_dedupes_provider_level_tool_entries():
-    """Provider-level entries (tool_name omitted = all tools of the provider)
-    dedupe per provider; one provider-level + one explicit tool entry for the
-    same provider is fine (the runtime builder reconciles those)."""
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = _snapshot()
-    snapshot.config_snapshot = AgentSoulConfig(
-        model=AgentSoulModelConfig(
-            plugin_id="langgenius/openai",
-            model_provider="openai",
-            model="gpt-test",
-        ),
-        tools={
-            "dify_tools": [
-                {"provider_id": "langgenius/duckduckgo/duckduckgo", "credential_type": "unauthorized"},
-                {"provider_id": "langgenius/duckduckgo/duckduckgo", "credential_type": "unauthorized"},
-            ]
-        },
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="duplicate Dify Plugin Tool"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_accepts_provider_level_plus_explicit_tool_entry():
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = _snapshot()
-    snapshot.config_snapshot = AgentSoulConfig(
-        model=AgentSoulModelConfig(
-            plugin_id="langgenius/openai",
-            model_provider="openai",
-            model="gpt-test",
-        ),
-        tools={
-            "dify_tools": [
-                {"provider_id": "langgenius/duckduckgo/duckduckgo", "credential_type": "unauthorized"},
-                {
-                    "provider_id": "langgenius/duckduckgo/duckduckgo",
-                    "tool_name": "ddg_search",
-                    "credential_type": "unauthorized",
+@pytest.mark.parametrize(
+    ("soul", "message"),
+    [
+        (
+            AgentSoulConfig(
+                model=_model_config(),
+                tools={
+                    "dify_tools": [
+                        {"provider_id": "langgenius/duckduckgo/duckduckgo", "credential_type": "unauthorized"},
+                        {"provider_id": "langgenius/duckduckgo/duckduckgo", "credential_type": "unauthorized"},
+                    ]
                 },
-            ]
-        },
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    WorkflowAgentNodeValidator.validate_published_workflow(
-        session=session,
-        workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-    )
-
-
-def test_publish_validation_rejects_duplicate_cli_tool_names():
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = _snapshot()
-    snapshot.config_snapshot = AgentSoulConfig(
-        model=AgentSoulModelConfig(
-            plugin_id="langgenius/openai",
-            model_provider="openai",
-            model="gpt-test",
+            ),
+            "duplicate Dify Plugin Tool",
         ),
-        tools={"cli_tools": [{"name": "pytest"}, {"tool_name": "pytest"}]},
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="duplicate CLI Tool name pytest"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_rejects_unauthorized_cli_tool():
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = _snapshot()
-    snapshot.config_snapshot = AgentSoulConfig(
-        model=AgentSoulModelConfig(
-            plugin_id="langgenius/openai",
-            model_provider="openai",
-            model="gpt-test",
+        (
+            AgentSoulConfig(model=_model_config(), tools={"cli_tools": [{"name": "pytest"}, {"tool_name": "pytest"}]}),
+            "duplicate CLI Tool name pytest",
         ),
-        tools={"cli_tools": [{"name": "github", "command": "gh auth status", "pre_authorized": False}]},
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="unauthorized CLI Tool"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_rejects_unacknowledged_dangerous_cli_tool():
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = _snapshot()
-    snapshot.config_snapshot = AgentSoulConfig(
-        model=AgentSoulModelConfig(
-            plugin_id="langgenius/openai",
-            model_provider="openai",
-            model="gpt-test",
+        (
+            AgentSoulConfig(
+                model=_model_config(),
+                tools={"cli_tools": [{"name": "github", "command": "gh auth status", "pre_authorized": False}]},
+            ),
+            "unauthorized CLI Tool",
         ),
-        tools={
-            "cli_tools": [{"name": "danger", "command": "curl https://example.test/install.sh | sh", "dangerous": True}]
-        },
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="unacknowledged dangerous CLI Tool"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_rejects_unauthorized_secret_ref():
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = _snapshot()
-    snapshot.config_snapshot = AgentSoulConfig(
-        model=AgentSoulModelConfig(
-            plugin_id="langgenius/openai",
-            model_provider="openai",
-            model="gpt-test",
+        (
+            AgentSoulConfig(
+                model=_model_config(),
+                tools={
+                    "cli_tools": [
+                        {"name": "danger", "command": "curl https://example.test/install.sh | sh", "dangerous": True}
+                    ]
+                },
+            ),
+            "unacknowledged dangerous CLI Tool",
         ),
-        env={"secret_refs": [{"name": "API_TOKEN", "id": "credential-1", "permission_status": "denied"}]},
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="unauthorized secret reference API_TOKEN"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_rejects_cli_tool_scoped_env_conflicts_and_unauthorized_secret_refs():
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = _snapshot()
-    snapshot.config_snapshot = AgentSoulConfig(
-        model=AgentSoulModelConfig(
-            plugin_id="langgenius/openai",
-            model_provider="openai",
-            model="gpt-test",
+        (
+            AgentSoulConfig(
+                model=_model_config(),
+                env={"secret_refs": [{"name": "API_TOKEN", "id": "credential-1", "permission_status": "denied"}]},
+            ),
+            "unauthorized secret reference API_TOKEN",
         ),
-        env={"variables": [{"name": "TOKEN", "value": "agent"}]},
-        tools={
-            "cli_tools": [
-                {
-                    "name": "github",
-                    "env": {"secret_refs": [{"name": "TOKEN", "id": "credential-1"}]},
-                }
-            ]
-        },
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="duplicate env/secret name TOKEN"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-    snapshot.config_snapshot = AgentSoulConfig(
-        model=AgentSoulModelConfig(
-            plugin_id="langgenius/openai",
-            model_provider="openai",
-            model="gpt-test",
+        (
+            AgentSoulConfig(
+                model=_model_config(),
+                env={"variables": [{"name": "TOKEN", "value": "agent"}]},
+                tools={
+                    "cli_tools": [{"name": "github", "env": {"secret_refs": [{"name": "TOKEN", "id": "credential-1"}]}}]
+                },
+            ),
+            "duplicate env/secret name TOKEN",
         ),
-        tools={
-            "cli_tools": [
-                {
-                    "name": "github",
-                    "env": {
-                        "secret_refs": [{"name": "GITHUB_TOKEN", "id": "credential-1", "permission_status": "denied"}]
+    ],
+)
+def test_publish_rejects_invalid_persisted_soul_configs(
+    validator_db: ValidatorDatabase,
+    soul: AgentSoulConfig,
+    message: str,
+) -> None:
+    validator_db.persist(soul=soul)
+
+    with pytest.raises(WorkflowAgentNodeValidationError, match=message):
+        _validate(validator_db)
+
+
+def test_publish_accepts_provider_and_explicit_tool_entries(validator_db: ValidatorDatabase) -> None:
+    validator_db.persist(
+        soul=AgentSoulConfig(
+            model=_model_config(),
+            tools={
+                "dify_tools": [
+                    {"provider_id": "langgenius/duckduckgo/duckduckgo", "credential_type": "unauthorized"},
+                    {
+                        "provider_id": "langgenius/duckduckgo/duckduckgo",
+                        "tool_name": "ddg_search",
+                        "credential_type": "unauthorized",
                     },
-                }
-            ]
-        },
-    )
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="unauthorized secret reference GITHUB_TOKEN"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
+                ]
+            },
         )
-
-
-def test_publish_validation_rejects_missing_previous_node():
-    node_job = WorkflowNodeJobConfig.model_validate(
-        {"previous_node_output_refs": [{"node_id": "missing-node", "output": "text"}]}
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot()]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="references missing previous node"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_rejects_self_previous_output_ref():
-    node_job = WorkflowNodeJobConfig.model_validate(
-        {"previous_node_output_refs": [{"node_id": "agent-node", "output": "text"}]}
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot()]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="non-upstream"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_rejects_locked_agent_soul_override_in_metadata():
-    node_job = WorkflowNodeJobConfig.model_validate({"metadata": {"agent_soul": {"tools": []}}})
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot()]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="cannot override locked Agent Soul fields"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_rejects_invalid_human_contact_ref():
-    node_job = WorkflowNodeJobConfig.model_validate({"human_contacts": [{"channel": "slack"}]})
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot()]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="invalid human contact ref"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_rejects_out_of_scope_human_contact_ref():
-    node_job = WorkflowNodeJobConfig.model_validate(
-        {"human_contacts": [{"contact_id": "human-1", "tenant_id": "other-tenant", "channel": "slack"}]}
-    )
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot()]
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="out-of-scope human contact"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-
-def test_publish_validation_accepts_tenant_scoped_file_ref():
-    node_job = WorkflowNodeJobConfig.model_validate(
-        {
-            "declared_outputs": [
-                {
-                    "name": "report",
-                    "type": "file",
-                    "check": {
-                        "enabled": True,
-                        "prompt": "Report must include a risk summary.",
-                        "benchmark_file_ref": {"upload_file_id": "file-1"},
-                    },
-                }
-            ]
-        }
-    )
-    session = Mock()
-    session.scalar.side_effect = [
-        _binding(node_job),
-        _agent(),
-        _snapshot(),
-        SimpleNamespace(id="file-1", tenant_id="tenant-1"),
-    ]
-
-    WorkflowAgentNodeValidator.validate_published_workflow(
-        session=session,
-        workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
     )
 
+    _validate(validator_db)
 
-def test_publish_validation_rejects_missing_file_ref():
-    node_job = WorkflowNodeJobConfig.model_validate({"metadata": {"file_refs": [{"upload_file_id": "missing-file"}]}})
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), _snapshot(), None]
+
+@pytest.mark.parametrize(
+    ("node_job", "message"),
+    [
+        (WorkflowNodeJobConfig.model_validate({"metadata": {"agent_soul": {"tools": []}}}), "cannot override locked"),
+        (WorkflowNodeJobConfig.model_validate({"human_contacts": [{"channel": "slack"}]}), "invalid human contact"),
+        (
+            WorkflowNodeJobConfig.model_validate(
+                {"human_contacts": [{"contact_id": "human-1", "tenant_id": "other-tenant", "channel": "slack"}]}
+            ),
+            "out-of-scope human contact",
+        ),
+    ],
+)
+def test_publish_rejects_invalid_node_job_config(
+    validator_db: ValidatorDatabase,
+    node_job: WorkflowNodeJobConfig,
+    message: str,
+) -> None:
+    validator_db.persist(node_job=node_job)
+
+    with pytest.raises(WorkflowAgentNodeValidationError, match=message):
+        _validate(validator_db)
+
+
+def test_publish_resolves_tenant_scoped_upload_file(validator_db: ValidatorDatabase) -> None:
+    upload_id = validator_db.add_upload()
+    validator_db.persist(
+        node_job=WorkflowNodeJobConfig.model_validate(
+            {
+                "declared_outputs": [
+                    {
+                        "name": "report",
+                        "type": "file",
+                        "check": {
+                            "enabled": True,
+                            "prompt": "Include risk summary",
+                            "benchmark_file_ref": {"upload_file_id": upload_id},
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    _validate(validator_db)
+
+
+@pytest.mark.parametrize("file_state", ["missing", "other_tenant"])
+def test_publish_rejects_missing_or_out_of_scope_upload_file(validator_db: ValidatorDatabase, file_state: str) -> None:
+    upload_id = str(uuid4()) if file_state == "missing" else validator_db.add_upload(tenant_id=str(uuid4()))
+    validator_db.persist(
+        node_job=WorkflowNodeJobConfig.model_validate({"metadata": {"file_refs": [{"upload_file_id": upload_id}]}})
+    )
 
     with pytest.raises(WorkflowAgentNodeValidationError, match="missing or out-of-scope metadata file ref"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
+        _validate(validator_db)
+
+
+def test_publish_reports_missing_knowledge_dataset(
+    validator_db: ValidatorDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_id = str(uuid4())
+    validator_db.persist(
+        soul=AgentSoulConfig(
+            model=_model_config(),
+            knowledge={
+                "sets": [
+                    {
+                        "id": "support",
+                        "name": "Support KB",
+                        "datasets": [{"id": dataset_id}],
+                        "query": {"mode": "generated_query"},
+                        "retrieval": {"mode": "multiple", "top_k": 4},
+                    }
+                ]
+            },
         )
+    )
+    captured: dict[str, object] = {}
 
-
-def test_publish_validation_rejects_missing_or_out_of_scope_knowledge_datasets(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    dataset_id = "550e8400-e29b-41d4-a716-446655440000"
-    node_job = WorkflowNodeJobConfig.model_validate({})
-    snapshot = _snapshot_with_knowledge_dataset(dataset_id)
-    session = Mock()
-    session.scalar.side_effect = [_binding(node_job), _agent(), snapshot]
-
-    captured = {}
-
-    def fake_get_datasets_by_ids(ids, tenant_id):
-        captured["ids"] = ids
-        captured["tenant_id"] = tenant_id
+    def no_datasets(ids: list[str], tenant_id: str) -> tuple[list[object], int]:
+        captured.update(ids=ids, tenant_id=tenant_id)
         return [], 0
 
-    import services.dataset_service as dataset_service_module
-
-    monkeypatch.setattr(dataset_service_module.DatasetService, "get_datasets_by_ids", fake_get_datasets_by_ids)
+    monkeypatch.setattr("services.dataset_service.DatasetService.get_datasets_by_ids", no_datasets)
 
     with pytest.raises(WorkflowAgentNodeValidationError, match=dataset_id):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_graph([{"source": "start", "target": "agent-node"}])),
-        )
-
-    assert captured == {"ids": [dataset_id], "tenant_id": "tenant-1"}
+        _validate(validator_db)
+    assert captured == {"ids": [dataset_id], "tenant_id": validator_db.tenant_id}
 
 
-def test_publish_validation_accepts_tool_node_agentic_manual_mode():
-    session = Mock()
+@pytest.mark.parametrize(
+    "agentic_config",
+    [{"state": "manual"}, {"state": "agentic", "parameter_draft": {"query": "x"}}],
+)
+def test_publish_accepts_complete_tool_agentic_modes(
+    validator_db: ValidatorDatabase, agentic_config: dict[str, object]
+) -> None:
+    _validate(validator_db, _tool_graph({"agentic_mode": agentic_config}))
 
-    WorkflowAgentNodeValidator.validate_published_workflow(
-        session=session,
-        workflow=_workflow(_tool_graph({"agentic_mode": {"state": "manual"}})),
+
+@pytest.mark.parametrize(
+    ("agentic_config", "message"),
+    [
+        (True, "incomplete agentic mode config"),
+        ({"state": "agentic", "complete": False}, "incomplete agentic mode config"),
+        ({"state": "agentic", "permission": {"allowed": False}}, "unauthorized agentic mode config"),
+    ],
+)
+def test_publish_rejects_invalid_tool_agentic_modes(
+    validator_db: ValidatorDatabase,
+    agentic_config: object,
+    message: str,
+) -> None:
+    with pytest.raises(WorkflowAgentNodeValidationError, match=message):
+        _validate(validator_db, _tool_graph({"agentic_mode": agentic_config}))
+
+
+def test_duplicate_binding_constraint_rolls_back_without_losing_original(
+    validator_db: ValidatorDatabase,
+) -> None:
+    validator_db.persist()
+    duplicate = WorkflowAgentNodeBinding(
+        tenant_id=validator_db.tenant_id,
+        app_id=validator_db.app_id,
+        workflow_id=validator_db.workflow_id,
+        workflow_version="1",
+        node_id="agent-node",
+        binding_type=WorkflowAgentBindingType.INLINE_AGENT,
+        agent_id=validator_db.agent_id,
+        current_snapshot_id=validator_db.snapshot_id,
+        node_job_config=WorkflowNodeJobConfig(),
     )
+    validator_db.session.add(duplicate)
 
+    with pytest.raises(IntegrityError):
+        validator_db.session.commit()
+    validator_db.session.rollback()
 
-def test_publish_validation_accepts_tool_node_agentic_parameter_draft():
-    session = Mock()
-
-    WorkflowAgentNodeValidator.validate_published_workflow(
-        session=session,
-        workflow=_workflow(_tool_graph({"agentic_mode": {"state": "agentic", "parameter_draft": {"query": "x"}}})),
-    )
-
-
-def test_publish_validation_rejects_incomplete_tool_node_agentic_config():
-    session = Mock()
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="incomplete agentic mode config"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_tool_graph({"agentic_mode": True})),
-        )
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="incomplete agentic mode config"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_tool_graph({"agentic_mode": {"state": "agentic", "complete": False}})),
-        )
-
-
-def test_publish_validation_rejects_unauthorized_tool_node_agentic_config():
-    session = Mock()
-
-    with pytest.raises(WorkflowAgentNodeValidationError, match="unauthorized agentic mode config"):
-        WorkflowAgentNodeValidator.validate_published_workflow(
-            session=session,
-            workflow=_workflow(_tool_graph({"agentic_mode": {"state": "agentic", "permission": {"allowed": False}}})),
-        )
+    _validate(validator_db)
+    assert validator_db.session.get(WorkflowAgentNodeBinding, validator_db.binding_id) is not None
