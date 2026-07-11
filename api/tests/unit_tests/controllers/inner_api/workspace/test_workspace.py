@@ -1,187 +1,224 @@
-"""
-Unit tests for inner_api workspace module
+"""SQLite-backed tests for the inner API workspace endpoints.
 
-Tests Pydantic model validation and endpoint handler logic.
-Auth/setup decorators are tested separately in test_auth_wraps.py;
-handler tests use inspect.unwrap() to bypass them and focus on business logic.
+Authentication decorators are covered separately; handler tests unwrap them
+and keep tenant events and service orchestration as explicit boundaries.
 """
 
 import inspect
-from datetime import datetime
-from unittest.mock import ANY, MagicMock, patch
+from collections.abc import Iterator
+from dataclasses import dataclass
+from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 from flask import Flask
 from pydantic import ValidationError
+from sqlalchemy import Engine, func, select
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
+from controllers.inner_api.workspace import workspace as workspace_module
 from controllers.inner_api.workspace.workspace import (
     EnterpriseWorkspace,
     EnterpriseWorkspaceNoOwnerEmail,
     WorkspaceCreatePayload,
     WorkspaceOwnerlessPayload,
 )
-from models.account import TenantStatus
+from models.account import Account, Tenant, TenantAccountJoin, TenantAccountRole
+from models.base import TypeBase
+
+
+@dataclass(frozen=True)
+class Database:
+    """Typed binding matching Flask-SQLAlchemy's callable session interface."""
+
+    engine: Engine
+    session: scoped_session[Session]
+
+
+@pytest.fixture
+def database(sqlite_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[Database]:
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[Account.__table__, Tenant.__table__, TenantAccountJoin.__table__],
+    )
+    session_registry = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    database = Database(engine=sqlite_engine, session=session_registry)
+    monkeypatch.setattr(workspace_module, "db", database)
+    try:
+        yield database
+    finally:
+        session_registry.remove()
+
+
+def _persist_account(session: Session, *, email: str = "owner@example.com") -> Account:
+    account = Account(name="Workspace owner", email=email)
+    account.id = str(uuid4())
+    session.add(account)
+    session.commit()
+    return account
+
+
+def _persist_tenant(session: Session, *, name: str, public_key: str | None = None) -> Tenant:
+    tenant = Tenant(name=name, encrypt_public_key=public_key)
+    session.add(tenant)
+    session.commit()
+    return tenant
+
+
+def _create_tenant_service_side_effect(name: str, *, is_from_dashboard: bool, session: Session) -> Tenant:
+    assert is_from_dashboard is True
+    return _persist_tenant(session, name=name)
+
+
+def _create_ownerless_tenant_side_effect(name: str, *, is_from_dashboard: bool, session: Session) -> Tenant:
+    assert is_from_dashboard is True
+    return _persist_tenant(session, name=name, public_key="pub-key")
+
+
+def _create_member_service_side_effect(
+    tenant: Tenant,
+    account: Account,
+    session: Session,
+    *,
+    role: str,
+) -> TenantAccountJoin:
+    membership = TenantAccountJoin(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        role=TenantAccountRole(role),
+    )
+    session.add(membership)
+    session.commit()
+    return membership
 
 
 class TestWorkspaceCreatePayload:
-    """Test WorkspaceCreatePayload Pydantic model validation"""
-
-    def test_valid_payload(self):
-        """Test valid payload with all fields passes validation"""
-        data = {
-            "name": "My Workspace",
-            "owner_email": "owner@example.com",
-        }
-        payload = WorkspaceCreatePayload.model_validate(data)
+    def test_valid_payload(self) -> None:
+        payload = WorkspaceCreatePayload.model_validate({"name": "My Workspace", "owner_email": "owner@example.com"})
         assert payload.name == "My Workspace"
         assert payload.owner_email == "owner@example.com"
 
-    def test_missing_name_fails_validation(self):
-        """Test that missing name fails validation"""
-        data = {"owner_email": "owner@example.com"}
+    def test_missing_name_fails_validation(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            WorkspaceCreatePayload.model_validate(data)
+            WorkspaceCreatePayload.model_validate({"owner_email": "owner@example.com"})
         assert "name" in str(exc_info.value)
 
-    def test_missing_owner_email_fails_validation(self):
-        """Test that missing owner_email fails validation"""
-        data = {"name": "My Workspace"}
+    def test_missing_owner_email_fails_validation(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            WorkspaceCreatePayload.model_validate(data)
+            WorkspaceCreatePayload.model_validate({"name": "My Workspace"})
         assert "owner_email" in str(exc_info.value)
 
 
 class TestWorkspaceOwnerlessPayload:
-    """Test WorkspaceOwnerlessPayload Pydantic model validation"""
+    def test_valid_payload(self) -> None:
+        assert WorkspaceOwnerlessPayload.model_validate({"name": "My Workspace"}).name == "My Workspace"
 
-    def test_valid_payload(self):
-        """Test valid payload with name passes validation"""
-        data = {"name": "My Workspace"}
-        payload = WorkspaceOwnerlessPayload.model_validate(data)
-        assert payload.name == "My Workspace"
-
-    def test_missing_name_fails_validation(self):
-        """Test that missing name fails validation"""
-        data = {}
+    def test_missing_name_fails_validation(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
-            WorkspaceOwnerlessPayload.model_validate(data)
+            WorkspaceOwnerlessPayload.model_validate({})
         assert "name" in str(exc_info.value)
 
 
 class TestEnterpriseWorkspace:
-    """Test EnterpriseWorkspace API endpoint handler logic.
-
-    Uses inspect.unwrap() to bypass auth/setup decorators (tested in test_auth_wraps.py)
-    and exercise the core business logic directly.
-    """
-
     @pytest.fixture
-    def api_instance(self):
+    def api_instance(self) -> EnterpriseWorkspace:
         return EnterpriseWorkspace()
 
-    def test_has_post_method(self, api_instance):
-        """Test that EnterpriseWorkspace has post method"""
-        assert hasattr(api_instance, "post")
+    def test_has_post_method(self, api_instance: EnterpriseWorkspace) -> None:
         assert callable(api_instance.post)
 
-    @patch("controllers.inner_api.workspace.workspace.tenant_was_created")
-    @patch("controllers.inner_api.workspace.workspace.TenantService")
-    @patch("controllers.inner_api.workspace.workspace.db")
-    def test_post_creates_workspace_with_owner(self, mock_db, mock_tenant_svc, mock_event, api_instance, app: Flask):
-        """Test that post() creates a workspace and assigns the owner account"""
-        # Arrange
-        mock_account = MagicMock()
-        mock_account.email = "owner@example.com"
-        mock_db.session.scalar.return_value = mock_account
-
-        now = datetime(2025, 1, 1, 12, 0, 0)
-        mock_tenant = MagicMock()
-        mock_tenant.id = "tenant-id"
-        mock_tenant.name = "My Workspace"
-        mock_tenant.plan = "sandbox"
-        mock_tenant.status = TenantStatus.NORMAL
-        mock_tenant.created_at = now
-        mock_tenant.updated_at = now
-        mock_tenant_svc.create_tenant.return_value = mock_tenant
-
-        # Act — unwrap to bypass auth/setup decorators (tested in test_auth_wraps.py)
-        unwrapped_post = inspect.unwrap(api_instance.post)
-        with app.test_request_context():
-            with patch("controllers.inner_api.workspace.workspace.inner_api_ns") as mock_ns:
-                mock_ns.payload = {"name": "My Workspace", "owner_email": "owner@example.com"}
-                result = unwrapped_post(api_instance)
-
-        # Assert
-        assert result["message"] == "enterprise workspace created."
-        assert result["tenant"]["id"] == "tenant-id"
-        assert result["tenant"]["name"] == "My Workspace"
-        mock_tenant_svc.create_tenant.assert_called_once_with("My Workspace", is_from_dashboard=True, session=ANY)
-        mock_tenant_svc.create_tenant_member.assert_called_once_with(
-            mock_tenant, mock_account, mock_db.session(), role="owner"
+    def test_post_creates_workspace_with_persisted_owner_membership(
+        self,
+        database: Database,
+        api_instance: EnterpriseWorkspace,
+        app: Flask,
+    ) -> None:
+        session = database.session()
+        account = _persist_account(session)
+        old_tenant = _persist_tenant(session, name="Existing Workspace")
+        session.add(
+            TenantAccountJoin(
+                tenant_id=old_tenant.id,
+                account_id=account.id,
+                role=TenantAccountRole.NORMAL,
+            )
         )
-        mock_event.send.assert_called_once_with(mock_tenant)
+        session.commit()
 
-    @patch("controllers.inner_api.workspace.workspace.db")
-    def test_post_returns_404_when_owner_not_found(self, mock_db, api_instance, app: Flask):
-        """Test that post() returns 404 when the owner account does not exist"""
-        # Arrange
-        mock_db.session.scalar.return_value = None
+        with (
+            patch.object(workspace_module, "TenantService") as tenant_service,
+            patch.object(workspace_module, "tenant_was_created") as tenant_created,
+            patch.object(workspace_module, "inner_api_ns") as namespace,
+            app.test_request_context(),
+        ):
+            tenant_service.create_tenant.side_effect = _create_tenant_service_side_effect
+            tenant_service.create_tenant_member.side_effect = _create_member_service_side_effect
+            namespace.payload = {"name": "My Workspace", "owner_email": account.email}
 
-        # Act
-        unwrapped_post = inspect.unwrap(api_instance.post)
-        with app.test_request_context():
-            with patch("controllers.inner_api.workspace.workspace.inner_api_ns") as mock_ns:
-                mock_ns.payload = {"name": "My Workspace", "owner_email": "missing@example.com"}
-                result = unwrapped_post(api_instance)
+            result = inspect.unwrap(api_instance.post)(api_instance)
 
-        # Assert
+        new_tenant = session.scalar(select(Tenant).where(Tenant.name == "My Workspace"))
+        assert new_tenant is not None
+        memberships = session.scalars(select(TenantAccountJoin).where(TenantAccountJoin.account_id == account.id)).all()
+        assert {(membership.tenant_id, membership.role) for membership in memberships} == {
+            (old_tenant.id, TenantAccountRole.NORMAL),
+            (new_tenant.id, TenantAccountRole.OWNER),
+        }
+        assert result["message"] == "enterprise workspace created."
+        assert result["tenant"]["id"] == new_tenant.id
+        tenant_created.send.assert_called_once_with(new_tenant)
+
+    def test_post_returns_404_when_owner_is_absent(
+        self,
+        database: Database,
+        api_instance: EnterpriseWorkspace,
+        app: Flask,
+    ) -> None:
+        with (
+            patch.object(workspace_module, "TenantService") as tenant_service,
+            patch.object(workspace_module, "inner_api_ns") as namespace,
+            app.test_request_context(),
+        ):
+            namespace.payload = {"name": "My Workspace", "owner_email": "missing@example.com"}
+
+            result = inspect.unwrap(api_instance.post)(api_instance)
+
         assert result == ({"message": "owner account not found."}, 404)
+        tenant_service.create_tenant.assert_not_called()
+        assert database.session().scalar(select(func.count(Tenant.id))) == 0
 
 
 class TestEnterpriseWorkspaceNoOwnerEmail:
-    """Test EnterpriseWorkspaceNoOwnerEmail API endpoint handler logic.
-
-    Uses inspect.unwrap() to bypass auth/setup decorators (tested in test_auth_wraps.py)
-    and exercise the core business logic directly.
-    """
-
     @pytest.fixture
-    def api_instance(self):
+    def api_instance(self) -> EnterpriseWorkspaceNoOwnerEmail:
         return EnterpriseWorkspaceNoOwnerEmail()
 
-    def test_has_post_method(self, api_instance):
-        """Test that endpoint has post method"""
-        assert hasattr(api_instance, "post")
+    def test_has_post_method(self, api_instance: EnterpriseWorkspaceNoOwnerEmail) -> None:
         assert callable(api_instance.post)
 
-    @patch("controllers.inner_api.workspace.workspace.tenant_was_created")
-    @patch("controllers.inner_api.workspace.workspace.TenantService")
-    def test_post_creates_ownerless_workspace(self, mock_tenant_svc, mock_event, api_instance, app: Flask):
-        """Test that post() creates a workspace without an owner and returns expected fields"""
-        # Arrange
-        now = datetime(2025, 1, 1, 12, 0, 0)
-        mock_tenant = MagicMock()
-        mock_tenant.id = "tenant-id"
-        mock_tenant.name = "My Workspace"
-        mock_tenant.encrypt_public_key = "pub-key"
-        mock_tenant.plan = "sandbox"
-        mock_tenant.status = TenantStatus.NORMAL
-        mock_tenant.custom_config = None
-        mock_tenant.created_at = now
-        mock_tenant.updated_at = now
-        mock_tenant_svc.create_tenant.return_value = mock_tenant
+    def test_post_creates_persisted_ownerless_workspace(
+        self,
+        database: Database,
+        api_instance: EnterpriseWorkspaceNoOwnerEmail,
+        app: Flask,
+    ) -> None:
+        with (
+            patch.object(workspace_module, "TenantService") as tenant_service,
+            patch.object(workspace_module, "tenant_was_created") as tenant_created,
+            patch.object(workspace_module, "inner_api_ns") as namespace,
+            app.test_request_context(),
+        ):
+            tenant_service.create_tenant.side_effect = _create_ownerless_tenant_side_effect
+            namespace.payload = {"name": "My Workspace"}
 
-        # Act — unwrap to bypass auth/setup decorators (tested in test_auth_wraps.py)
-        unwrapped_post = inspect.unwrap(api_instance.post)
-        with app.test_request_context():
-            with patch("controllers.inner_api.workspace.workspace.inner_api_ns") as mock_ns:
-                mock_ns.payload = {"name": "My Workspace"}
-                result = unwrapped_post(api_instance)
+            result = inspect.unwrap(api_instance.post)(api_instance)
 
-        # Assert
+        session = database.session()
+        tenant = session.scalar(select(Tenant).where(Tenant.name == "My Workspace"))
+        assert tenant is not None
+        assert session.scalar(select(func.count(TenantAccountJoin.id))) == 0
         assert result["message"] == "enterprise workspace created."
-        assert result["tenant"]["id"] == "tenant-id"
+        assert result["tenant"]["id"] == tenant.id
         assert result["tenant"]["encrypt_public_key"] == "pub-key"
         assert result["tenant"]["custom_config"] == {}
-        mock_tenant_svc.create_tenant.assert_called_once_with("My Workspace", is_from_dashboard=True, session=ANY)
-        mock_event.send.assert_called_once_with(mock_tenant)
+        tenant_created.send.assert_called_once_with(tenant)
