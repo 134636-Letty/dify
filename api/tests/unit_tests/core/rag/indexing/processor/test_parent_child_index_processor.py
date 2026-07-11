@@ -1,13 +1,61 @@
+from collections.abc import Iterator
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from core.entities.knowledge_entities import PreviewDetail
 from core.rag.entities import ParentMode, Rule, Segmentation
 from core.rag.index_processor.constant.index_type import IndexTechniqueType
 from core.rag.index_processor.processor.parent_child_index_processor import ParentChildIndexProcessor
 from core.rag.models.document import AttachmentDocument, ChildDocument, Document
+from models.base import TypeBase
+from models.dataset import ChildChunk, DatasetProcessRule, DocumentSegment
+
+
+@pytest.fixture
+def orm_session(sqlite_engine: Engine) -> Iterator[scoped_session[Session]]:
+    """Provide the processor's Flask-style scoped session on SQLite."""
+
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[ChildChunk.__table__, DocumentSegment.__table__, DatasetProcessRule.__table__],
+    )
+    session = scoped_session(sessionmaker(sqlite_engine, expire_on_commit=False))
+    try:
+        yield session
+    finally:
+        session.remove()
+
+
+def _segment(*, index_node_id: str = "node-1", dataset_id: str = "dataset-1") -> DocumentSegment:
+    return DocumentSegment(
+        tenant_id="tenant-1",
+        dataset_id=dataset_id,
+        document_id="doc-1",
+        position=1,
+        content="parent",
+        word_count=1,
+        tokens=1,
+        created_by="user-1",
+        index_node_id=index_node_id,
+    )
+
+
+def _child(segment: DocumentSegment, *, index_node_id: str, dataset_id: str = "dataset-1") -> ChildChunk:
+    return ChildChunk(
+        tenant_id="tenant-1",
+        dataset_id=dataset_id,
+        document_id=segment.document_id,
+        segment_id=segment.id,
+        position=1,
+        content="child",
+        word_count=1,
+        created_by="user-1",
+        index_node_id=index_node_id,
+    )
 
 
 class TestParentChildIndexProcessor:
@@ -207,12 +255,18 @@ class TestParentChildIndexProcessor:
         assert all(isinstance(doc, Document) for doc in formatted_docs)
         vector.create_multimodal.assert_called_once_with(multimodal_docs)
 
-    def test_clean_with_precomputed_child_ids(self, processor: ParentChildIndexProcessor, dataset: Mock) -> None:
-        session = Mock()
+    def test_clean_with_precomputed_child_ids(
+        self, processor: ParentChildIndexProcessor, dataset: Mock, orm_session: scoped_session[Session]
+    ) -> None:
+        segment = _segment()
+        orm_session.add_all(
+            [segment, _child(segment, index_node_id="child-1"), _child(segment, index_node_id="child-2")]
+        )
+        orm_session.commit()
 
         with (
             patch("core.rag.index_processor.processor.parent_child_index_processor.Vector") as mock_vector_cls,
-            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", session),
+            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", orm_session),
         ):
             vector = mock_vector_cls.return_value
             processor.clean(
@@ -223,53 +277,73 @@ class TestParentChildIndexProcessor:
             )
 
         vector.delete_by_ids.assert_called_once_with(["child-1", "child-2"])
-        session.execute.assert_called()
-        session.commit.assert_called_once()
+        assert orm_session.scalars(select(ChildChunk)).all() == []
 
     def test_clean_queries_child_ids_when_not_precomputed(
-        self, processor: ParentChildIndexProcessor, dataset: Mock
+        self,
+        processor: ParentChildIndexProcessor,
+        dataset: Mock,
+        orm_session: scoped_session[Session],
     ) -> None:
-        execute_result = Mock()
-        execute_result.all.return_value = [("child-1",), (None,), ("child-2",)]
-        session = Mock()
-        session.execute.return_value = execute_result
+        segment = _segment()
+        orm_session.add_all(
+            [
+                segment,
+                _child(segment, index_node_id="child-1"),
+                _child(segment, index_node_id="child-2"),
+                _child(segment, index_node_id="other-child", dataset_id="other-dataset"),
+            ]
+        )
+        orm_session.commit()
 
         with (
             patch("core.rag.index_processor.processor.parent_child_index_processor.Vector") as mock_vector_cls,
-            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", session),
+            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", orm_session),
         ):
             vector = mock_vector_cls.return_value
             processor.clean(dataset, ["node-1"], delete_child_chunks=False)
 
         vector.delete_by_ids.assert_called_once_with(["child-1", "child-2"])
 
-    def test_clean_dataset_wide_cleanup(self, processor: ParentChildIndexProcessor, dataset: Mock) -> None:
-        session = Mock()
+    def test_clean_dataset_wide_cleanup(
+        self, processor: ParentChildIndexProcessor, dataset: Mock, orm_session: scoped_session[Session]
+    ) -> None:
+        segment = _segment()
+        other_segment = _segment(dataset_id="other-dataset")
+        orm_session.add_all(
+            [
+                segment,
+                other_segment,
+                _child(segment, index_node_id="child-1"),
+                _child(other_segment, index_node_id="keep", dataset_id="other-dataset"),
+            ]
+        )
+        orm_session.commit()
 
         with (
             patch("core.rag.index_processor.processor.parent_child_index_processor.Vector") as mock_vector_cls,
-            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", session),
+            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", orm_session),
         ):
             vector = mock_vector_cls.return_value
             processor.clean(dataset, None, delete_child_chunks=True)
 
         vector.delete.assert_called_once()
-        session.execute.assert_called()
-        session.commit.assert_called_once()
+        remaining = orm_session.scalars(select(ChildChunk)).all()
+        assert [child.index_node_id for child in remaining] == ["keep"]
 
-    def test_clean_deletes_summaries_when_requested(self, processor: ParentChildIndexProcessor, dataset: Mock) -> None:
-        scalars_result = Mock()
-        scalars_result.all.return_value = [SimpleNamespace(id="seg-1")]
-        session = Mock()
-        session.scalars.return_value = scalars_result
-        session_ctx = MagicMock()
-        session_ctx.__enter__.return_value = session
-        session_ctx.__exit__.return_value = False
+    def test_clean_deletes_summaries_when_requested(
+        self, processor: ParentChildIndexProcessor, dataset: Mock, orm_session: scoped_session[Session]
+    ) -> None:
+        segment = _segment()
+        orm_session.add(segment)
+        orm_session.commit()
+        engine = orm_session.get_bind()
+        session_maker = sessionmaker(engine, expire_on_commit=False)
 
         with (
             patch(
                 "core.rag.index_processor.processor.parent_child_index_processor.session_factory.create_session",
-                return_value=session_ctx,
+                session_maker,
             ),
             patch(
                 "core.rag.index_processor.processor.parent_child_index_processor.SummaryIndexService.delete_summaries_for_segments"
@@ -278,7 +352,7 @@ class TestParentChildIndexProcessor:
         ):
             processor.clean(dataset, ["node-1"], delete_summaries=True, precomputed_child_node_ids=[])
 
-        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=["seg-1"])
+        mock_summary.assert_called_once_with(dataset=dataset, segment_ids=[segment.id])
 
     def test_clean_deletes_all_summaries_when_node_ids_missing(
         self, processor: ParentChildIndexProcessor, dataset: Mock
@@ -323,7 +397,11 @@ class TestParentChildIndexProcessor:
         assert child_docs[0].metadata["doc_hash"] == "hash"
 
     def test_index_creates_process_rule_segments_and_vectors(
-        self, processor: ParentChildIndexProcessor, dataset: Mock, dataset_document: Mock
+        self,
+        processor: ParentChildIndexProcessor,
+        dataset: Mock,
+        dataset_document: Mock,
+        orm_session: scoped_session[Session],
     ) -> None:
         parent_childs = SimpleNamespace(
             parent_mode=ParentMode.PARAGRAPH,
@@ -335,17 +413,10 @@ class TestParentChildIndexProcessor:
                 )
             ],
         )
-        dataset_rule = SimpleNamespace(id="rule-1")
-        session = Mock()
-
         with (
             patch(
                 "core.rag.index_processor.processor.parent_child_index_processor.ParentChildStructureChunk.model_validate",
                 return_value=parent_childs,
-            ),
-            patch(
-                "core.rag.index_processor.processor.parent_child_index_processor.DatasetProcessRule",
-                return_value=dataset_rule,
             ),
             patch(
                 "core.rag.index_processor.processor.parent_child_index_processor.helper.generate_text_hash",
@@ -355,36 +426,33 @@ class TestParentChildIndexProcessor:
                 "core.rag.index_processor.processor.parent_child_index_processor.DatasetDocumentStore"
             ) as mock_store_cls,
             patch("core.rag.index_processor.processor.parent_child_index_processor.Vector") as mock_vector_cls,
-            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", session),
+            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", orm_session),
         ):
             processor.index(dataset, dataset_document, {"parent_child_chunks": []})
 
-        assert dataset_document.dataset_process_rule_id == "rule-1"
-        session.add.assert_called_once_with(dataset_rule)
-        session.flush.assert_called_once()
-        session.commit.assert_called_once()
+        dataset_rule = orm_session.scalar(select(DatasetProcessRule))
+        assert dataset_rule is not None
+        assert dataset_rule.dataset_id == dataset.id
+        assert dataset_document.dataset_process_rule_id == dataset_rule.id
         mock_store_cls.return_value.add_documents.assert_called_once()
         assert mock_vector_cls.return_value.create.call_count == 1
         mock_vector_cls.return_value.create_multimodal.assert_called_once()
 
     def test_index_uses_content_files_when_files_missing(
-        self, processor: ParentChildIndexProcessor, dataset: Mock, dataset_document: Mock
+        self,
+        processor: ParentChildIndexProcessor,
+        dataset: Mock,
+        dataset_document: Mock,
+        orm_session: scoped_session[Session],
     ) -> None:
         parent_childs = SimpleNamespace(
             parent_mode=ParentMode.PARAGRAPH,
             parent_child_chunks=[SimpleNamespace(parent_content="parent", child_contents=["child"], files=None)],
         )
-        dataset_rule = SimpleNamespace(id="rule-1")
-        session = Mock()
-
         with (
             patch(
                 "core.rag.index_processor.processor.parent_child_index_processor.ParentChildStructureChunk.model_validate",
                 return_value=parent_childs,
-            ),
-            patch(
-                "core.rag.index_processor.processor.parent_child_index_processor.DatasetProcessRule",
-                return_value=dataset_rule,
             ),
             patch(
                 "core.rag.index_processor.processor.parent_child_index_processor.helper.generate_text_hash",
@@ -399,11 +467,12 @@ class TestParentChildIndexProcessor:
             ) as mock_files,
             patch("core.rag.index_processor.processor.parent_child_index_processor.DatasetDocumentStore"),
             patch("core.rag.index_processor.processor.parent_child_index_processor.Vector"),
-            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", session),
+            patch("core.rag.index_processor.processor.parent_child_index_processor.db.session", orm_session),
         ):
             processor.index(dataset, dataset_document, {"parent_child_chunks": []})
 
         mock_files.assert_called_once()
+        assert orm_session.scalar(select(DatasetProcessRule)) is not None
 
     def test_index_raises_when_account_missing(
         self, processor: ParentChildIndexProcessor, dataset: Mock, dataset_document: Mock
