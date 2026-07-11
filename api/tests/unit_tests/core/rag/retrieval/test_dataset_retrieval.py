@@ -1,6 +1,9 @@
+"""Dataset retrieval tests with SQLite-backed ORM state and isolated retrieval/model boundaries."""
+
 import threading
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager, nullcontext
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, Mock, patch
@@ -8,6 +11,9 @@ from uuid import uuid4
 
 import pytest
 from flask import Flask, current_app
+from sqlalchemy import event, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
 from core.app.app_config.entities import (
     DatasetEntity,
@@ -34,9 +40,24 @@ from core.rag.retrieval.dataset_retrieval import DatasetRetrieval
 from core.rag.retrieval.retrieval_methods import RetrievalMethod
 from core.workflow.nodes.knowledge_retrieval import exc
 from core.workflow.nodes.knowledge_retrieval.retrieval import KnowledgeRetrievalRequest
+from extensions.storage.storage_type import StorageType
 from graphon.model_runtime.entities.llm_entities import LLMUsage
 from graphon.model_runtime.entities.model_entities import ModelFeature
-from models.dataset import Dataset
+from models import UploadFile
+from models.base import TypeBase
+from models.dataset import (
+    ChildChunk,
+    Dataset,
+    DatasetMetadata,
+    DatasetQuery,
+    DocumentSegment,
+    DocumentSegmentSummary,
+    RateLimitLog,
+    SegmentAttachmentBinding,
+)
+from models.dataset import (
+    Document as DatasetDocument,
+)
 from models.enums import CreatorUserRole
 
 # ==================== Helper Functions ====================
@@ -95,14 +116,111 @@ def _metadata_condition() -> AppMetadataFilteringCondition:
     return AppMetadataFilteringCondition(logical_operator="and", conditions=[])
 
 
-@contextmanager
-def _patched_retriever_session():
-    session = MagicMock()
-    session_ctx = MagicMock()
-    session_ctx.__enter__.return_value = session
-    session_ctx.__exit__.return_value = None
-    with patch("core.rag.retrieval.dataset_retrieval.session_factory.create_session", return_value=session_ctx):
+@pytest.fixture
+def retrieval_session(sqlite_engine: Engine) -> Iterator[Session]:
+    """Yield an isolated session containing only retrieval-owned tables."""
+
+    models = (
+        Dataset,
+        DatasetDocument,
+        DocumentSegment,
+        ChildChunk,
+        DocumentSegmentSummary,
+        DatasetMetadata,
+        DatasetQuery,
+        RateLimitLog,
+        SegmentAttachmentBinding,
+        UploadFile,
+    )
+    tables = [TypeBase.metadata.tables[model.__tablename__] for model in models]
+    TypeBase.metadata.create_all(sqlite_engine, tables=tables)
+    with Session(sqlite_engine, expire_on_commit=False) as session:
         yield session
+
+
+@contextmanager
+def _patched_retriever_session(session: Session):
+    with patch(
+        "core.rag.retrieval.dataset_retrieval.session_factory.create_session",
+        return_value=nullcontext(session),
+    ):
+        yield session
+
+
+def _persist_dataset(
+    session: Session,
+    *,
+    dataset_id: str,
+    tenant_id: str,
+    name: str = "test_dataset",
+    provider: str = "vendor",
+    indexing_technique: str = "high_quality",
+) -> Dataset:
+    dataset = Dataset(
+        id=dataset_id,
+        tenant_id=tenant_id,
+        name=name,
+        provider=provider,
+        indexing_technique=indexing_technique,
+        created_by="00000000-0000-0000-0000-000000000099",
+    )
+    session.add(dataset)
+    return dataset
+
+
+def _persist_document(
+    session: Session,
+    *,
+    document_id: str,
+    dataset_id: str,
+    tenant_id: str,
+    name: str = "test_doc",
+    enabled: bool = True,
+    archived: bool = False,
+) -> DatasetDocument:
+    document = DatasetDocument(
+        id=document_id,
+        tenant_id=tenant_id,
+        dataset_id=dataset_id,
+        position=1,
+        data_source_type="upload_file",
+        batch="batch-1",
+        name=name,
+        created_from="api",
+        created_by="00000000-0000-0000-0000-000000000099",
+        indexing_status="completed",
+        enabled=enabled,
+        archived=archived,
+        doc_metadata={},
+    )
+    session.add(document)
+    return document
+
+
+def _persist_segment(
+    session: Session,
+    *,
+    segment_id: str,
+    document_id: str,
+    dataset_id: str,
+    tenant_id: str,
+    index_node_id: str,
+) -> DocumentSegment:
+    segment = DocumentSegment(
+        tenant_id=tenant_id,
+        dataset_id=dataset_id,
+        document_id=document_id,
+        position=1,
+        content="segment content",
+        word_count=2,
+        tokens=2,
+        created_by=str(uuid4()),
+        index_node_id=index_node_id,
+        hit_count=0,
+    )
+    segment.id = segment_id
+    session.add(segment)
+    return segment
 
 
 def create_side_effect_for_search(documents: list[Document]):
@@ -1659,7 +1777,7 @@ class TestRetrievalService:
     @patch("core.rag.retrieval.dataset_retrieval.DataPostProcessor")
     @patch("core.rag.retrieval.dataset_retrieval.DatasetRetrieval._retriever")
     def test_multiple_retrieve_thread_skips_second_reranking_with_single_dataset(
-        self, mock_retriever, mock_data_processor_class, mock_flask_app, mock_dataset
+        self, mock_retriever, mock_data_processor_class, mock_flask_app, mock_dataset, retrieval_session
     ):
         """
         Test that _multiple_retrieve_thread skips second reranking when dataset_count is 1.
@@ -1712,7 +1830,7 @@ class TestRetrievalService:
         all_documents = []
 
         # Act - Call with dataset_count = 1
-        with _patched_retriever_session():
+        with _patched_retriever_session(retrieval_session):
             dataset_retrieval._multiple_retrieve_thread(
                 flask_app=mock_flask_app,
                 available_datasets=[mock_dataset],
@@ -1744,7 +1862,13 @@ class TestRetrievalService:
     @patch("core.rag.retrieval.dataset_retrieval.DatasetRetrieval._retriever")
     @patch("core.rag.retrieval.dataset_retrieval.DatasetRetrieval.calculate_vector_score")
     def test_multiple_retrieve_thread_performs_second_reranking_with_multiple_datasets(
-        self, mock_calculate_vector_score, mock_retriever, mock_data_processor_class, mock_flask_app, mock_dataset
+        self,
+        mock_calculate_vector_score,
+        mock_retriever,
+        mock_data_processor_class,
+        mock_flask_app,
+        mock_dataset,
+        retrieval_session,
     ):
         """
         Test that _multiple_retrieve_thread performs second reranking when dataset_count > 1.
@@ -1820,7 +1944,7 @@ class TestRetrievalService:
         mock_dataset2.provider = "dify"
 
         # Act - Call with dataset_count = 2
-        with _patched_retriever_session():
+        with _patched_retriever_session(retrieval_session):
             dataset_retrieval._multiple_retrieve_thread(
                 flask_app=mock_flask_app,
                 available_datasets=[mock_dataset, mock_dataset2],
@@ -1862,7 +1986,13 @@ class TestRetrievalService:
     @patch("core.rag.retrieval.dataset_retrieval.DatasetRetrieval._retriever")
     @patch("core.rag.retrieval.dataset_retrieval.DatasetRetrieval.calculate_vector_score")
     def test_multiple_retrieve_thread_single_dataset_uses_standard_scoring(
-        self, mock_calculate_vector_score, mock_retriever, mock_data_processor_class, mock_flask_app, mock_dataset
+        self,
+        mock_calculate_vector_score,
+        mock_retriever,
+        mock_data_processor_class,
+        mock_flask_app,
+        mock_dataset,
+        retrieval_session,
     ):
         """
         Test that _multiple_retrieve_thread uses standard scoring when dataset_count is 1
@@ -1925,7 +2055,7 @@ class TestRetrievalService:
         all_documents = []
 
         # Act - Call with dataset_count = 1
-        with _patched_retriever_session():
+        with _patched_retriever_session(retrieval_session):
             dataset_retrieval._multiple_retrieve_thread(
                 flask_app=mock_flask_app,
                 available_datasets=[mock_dataset],
@@ -2313,11 +2443,10 @@ class TestCheckKnowledgeRateLimit:
         assert not mock_redis.zremrangebyscore.called
         assert not mock_redis.zcard.called
 
-    @patch("core.rag.retrieval.dataset_retrieval.session_factory")
     @patch("core.rag.retrieval.dataset_retrieval.FeatureService")
     @patch("core.rag.retrieval.dataset_retrieval.redis_client")
     @patch("core.rag.retrieval.dataset_retrieval.time")
-    def test_rate_limit_enabled_not_exceeded(self, mock_time, mock_redis, mock_feature_service, mock_session_factory):
+    def test_rate_limit_enabled_not_exceeded(self, mock_time, mock_redis, mock_feature_service):
         """
         Test that when rate limit is enabled but not exceeded, no exception is raised.
 
@@ -2351,11 +2480,6 @@ class TestCheckKnowledgeRateLimit:
         # zcard returns 50 (within limit of 100)
         mock_redis.zcard.return_value = 50
 
-        # Mock session_factory.create_session
-        mock_session = MagicMock()
-        mock_session_factory.create_session.return_value.__enter__.return_value = mock_session
-        mock_session_factory.create_session.return_value.__exit__.return_value = None
-
         # Act & Assert - should not raise any exception
         dataset_retrieval._check_knowledge_rate_limit(tenant_id)
 
@@ -2365,12 +2489,11 @@ class TestCheckKnowledgeRateLimit:
         mock_redis.zremrangebyscore.assert_called_once_with(expected_key, 0, current_time - 60000)
         mock_redis.zcard.assert_called_once_with(expected_key)
 
-    @patch("core.rag.retrieval.dataset_retrieval.session_factory")
     @patch("core.rag.retrieval.dataset_retrieval.FeatureService")
     @patch("core.rag.retrieval.dataset_retrieval.redis_client")
     @patch("core.rag.retrieval.dataset_retrieval.time")
     def test_rate_limit_enabled_exceeded_raises_exception(
-        self, mock_time, mock_redis, mock_feature_service, mock_session_factory
+        self, mock_time, mock_redis, mock_feature_service, retrieval_session
     ):
         """
         Test that when rate limit is enabled and exceeded, RateLimitExceededError is raised.
@@ -2403,24 +2526,21 @@ class TestCheckKnowledgeRateLimit:
         # Mock Redis operations - return count exceeding limit
         mock_redis.zcard.return_value = 150  # Exceeds limit of 100
 
-        # Mock session_factory.create_session
-        mock_session = MagicMock()
-        mock_session_factory.create_session.return_value.__enter__.return_value = mock_session
-        mock_session_factory.create_session.return_value.__exit__.return_value = None
-
         # Act & Assert
-        with pytest.raises(exc.RateLimitExceededError) as exc_info:
-            dataset_retrieval._check_knowledge_rate_limit(tenant_id)
+        with _patched_retriever_session(retrieval_session):
+            with pytest.raises(exc.RateLimitExceededError) as exc_info:
+                dataset_retrieval._check_knowledge_rate_limit(tenant_id)
 
         # Verify exception message
         assert "knowledge base request rate limit" in str(exc_info.value)
 
-        # Verify RateLimitLog was created
-        mock_session.add.assert_called_once()
-        added_log = mock_session.add.call_args[0][0]
+        # The log participates in the caller-owned transaction and can be rolled back.
+        added_log = next(item for item in retrieval_session.new if isinstance(item, RateLimitLog))
         assert added_log.tenant_id == tenant_id
         assert added_log.subscription_plan == "professional"
         assert added_log.operation == "knowledge"
+        retrieval_session.rollback()
+        assert retrieval_session.query(RateLimitLog).count() == 0
 
 
 # ==================== Test _get_available_datasets ====================
@@ -2526,8 +2646,7 @@ class TestDatasetRetrievalKnowledgeRetrieval:
         assert request.model_mode == "chat"
 
     @patch("core.rag.retrieval.dataset_retrieval.DataPostProcessor")
-    @patch("core.rag.retrieval.dataset_retrieval.session_factory")
-    def test_knowledge_retrieval_multiple_mode(self, mock_session_factory, mock_data_processor):
+    def test_knowledge_retrieval_multiple_mode(self, mock_data_processor, retrieval_session):
         """
         Test knowledge_retrieval in multiple retrieval mode.
 
@@ -2547,6 +2666,15 @@ class TestDatasetRetrievalKnowledgeRetrieval:
         app_id = str(uuid4())
         dataset_id1 = str(uuid4())
         dataset_id2 = str(uuid4())
+        document_id = str(uuid4())
+        _persist_dataset(retrieval_session, dataset_id=dataset_id1, tenant_id=tenant_id)
+        _persist_document(
+            retrieval_session,
+            document_id=document_id,
+            dataset_id=dataset_id1,
+            tenant_id=tenant_id,
+        )
+        retrieval_session.commit()
 
         request = KnowledgeRetrievalRequest(
             tenant_id=tenant_id,
@@ -2585,7 +2713,7 @@ class TestDatasetRetrievalKnowledgeRetrieval:
                         mock_record = Mock()
                         mock_record.segment = Mock()
                         mock_record.segment.dataset_id = dataset_id1
-                        mock_record.segment.document_id = str(uuid4())
+                        mock_record.segment.document_id = document_id
                         mock_record.segment.index_node_hash = "hash123"
                         mock_record.segment.hit_count = 5
                         mock_record.segment.word_count = 100
@@ -2604,35 +2732,15 @@ class TestDatasetRetrievalKnowledgeRetrieval:
                             "core.rag.retrieval.dataset_retrieval.RetrievalService",
                             return_value=mock_retrieval_service,
                         ):
-                            # Mock database queries
-                            mock_session = MagicMock()
-                            mock_session_factory.create_session.return_value.__enter__.return_value = mock_session
-                            mock_session_factory.create_session.return_value.__exit__.return_value = None
-
-                            mock_dataset_from_db = Mock()
-                            mock_dataset_from_db.id = dataset_id1
-                            mock_dataset_from_db.name = "test_dataset"
-
-                            mock_document = Mock()
-                            mock_document.id = str(uuid4())
-                            mock_document.name = "test_doc"
-                            mock_document.data_source_type = "upload_file"
-                            mock_document.doc_metadata = {}
-
-                            mock_datasets = MagicMock()
-                            mock_datasets.all.return_value = [mock_dataset_from_db]
-                            mock_documents = MagicMock()
-                            mock_documents.all.return_value = [mock_document]
-                            mock_session.scalars.side_effect = [mock_datasets, mock_documents]
-
-                            # Act
-                            result = dataset_retrieval.knowledge_retrieval(MagicMock(), request)
+                            with _patched_retriever_session(retrieval_session):
+                                # Act
+                                result = dataset_retrieval.knowledge_retrieval(retrieval_session, request)
 
                             # Assert
                             assert isinstance(result, list)
                             mock_multiple_retrieve.assert_called_once()
 
-    def test_knowledge_retrieval_metadata_filtering_disabled(self):
+    def test_knowledge_retrieval_metadata_filtering_disabled(self, retrieval_session: Session):
         """
         Test knowledge_retrieval with metadata filtering disabled.
 
@@ -2675,14 +2783,14 @@ class TestDatasetRetrievalKnowledgeRetrieval:
                 ) as mock_get_metadata:
                     with patch.object(dataset_retrieval, "multiple_retrieve", return_value=[]):
                         # Act
-                        result = dataset_retrieval.knowledge_retrieval(MagicMock(), request)
+                        result = dataset_retrieval.knowledge_retrieval(retrieval_session, request)
 
                         # Assert
                         assert isinstance(result, list)
                         # get_metadata_filter_condition should NOT be called when mode is "disabled"
                         mock_get_metadata.assert_not_called()
 
-    def test_knowledge_retrieval_with_external_documents(self):
+    def test_knowledge_retrieval_with_external_documents(self, retrieval_session: Session):
         """
         Test knowledge_retrieval with external documents.
 
@@ -2733,14 +2841,14 @@ class TestDatasetRetrievalKnowledgeRetrieval:
                     )
                     with patch.object(dataset_retrieval, "multiple_retrieve", return_value=[external_doc]):
                         # Act
-                        result = dataset_retrieval.knowledge_retrieval(MagicMock(), request)
+                        result = dataset_retrieval.knowledge_retrieval(retrieval_session, request)
 
                         # Assert
                         assert isinstance(result, list)
                         if result:
                             assert result[0].metadata.data_source_type == "external"
 
-    def test_knowledge_retrieval_empty_results(self):
+    def test_knowledge_retrieval_empty_results(self, retrieval_session: Session):
         """
         Test knowledge_retrieval when no documents are found.
 
@@ -2776,12 +2884,12 @@ class TestDatasetRetrievalKnowledgeRetrieval:
                     # Mock multiple_retrieve to return empty list
                     with patch.object(dataset_retrieval, "multiple_retrieve", return_value=[]):
                         # Act
-                        result = dataset_retrieval.knowledge_retrieval(MagicMock(), request)
+                        result = dataset_retrieval.knowledge_retrieval(retrieval_session, request)
 
                         # Assert
                         assert result == []
 
-    def test_knowledge_retrieval_rate_limit_exceeded(self):
+    def test_knowledge_retrieval_rate_limit_exceeded(self, retrieval_session: Session):
         """
         Test knowledge_retrieval when rate limit is exceeded.
 
@@ -2816,9 +2924,9 @@ class TestDatasetRetrievalKnowledgeRetrieval:
         ):
             # Act & Assert
             with pytest.raises(exc.RateLimitExceededError):
-                dataset_retrieval.knowledge_retrieval(MagicMock(), request)
+                dataset_retrieval.knowledge_retrieval(retrieval_session, request)
 
-    def test_knowledge_retrieval_no_available_datasets(self):
+    def test_knowledge_retrieval_no_available_datasets(self, retrieval_session: Session):
         """
         Test knowledge_retrieval when no datasets are available.
 
@@ -2850,7 +2958,7 @@ class TestDatasetRetrievalKnowledgeRetrieval:
             # Mock _get_available_datasets to return empty list
             with patch.object(dataset_retrieval, "_get_available_datasets", return_value=[]):
                 # Act
-                result = dataset_retrieval.knowledge_retrieval(MagicMock(), request)
+                result = dataset_retrieval.knowledge_retrieval(retrieval_session, request)
 
                 # Assert
                 assert result == []
@@ -2903,11 +3011,8 @@ class TestProcessMetadataFilterFunc:
     3. Adding appropriate SQLAlchemy expressions to the filters list
     4. Returning the updated filters list
 
-    Mocking Strategy:
-    ==================
-    - Mock DatasetDocument.doc_metadata to avoid database dependencies
-    - Verify filter expressions are created correctly
-    - Test with various data types (str, int, float, list)
+    The expressions use the mapped ``DatasetDocument.doc_metadata`` JSON column
+    directly; execution coverage lives in the SQLite-backed metadata-condition tests.
     """
 
     @pytest.fixture
@@ -2919,58 +3024,6 @@ class TestProcessMetadataFilterFunc:
             DatasetRetrieval: Instance to test process_metadata_filter_func
         """
         return DatasetRetrieval()
-
-    @pytest.fixture
-    def mock_doc_metadata(self):
-        """
-        Mock the DatasetDocument.doc_metadata JSON field.
-
-        The method uses DatasetDocument.doc_metadata[metadata_name] to access
-        JSON fields. We mock this to avoid database dependencies.
-
-        Returns:
-            Mock: Mocked doc_metadata attribute
-        """
-        mock_metadata_field = MagicMock()
-
-        # Create mock for string access
-        mock_string_access = MagicMock()
-        mock_string_access.like = MagicMock()
-        mock_string_access.notlike = MagicMock()
-        mock_string_access.__eq__ = MagicMock(return_value=MagicMock())
-        mock_string_access.__ne__ = MagicMock(return_value=MagicMock())
-        mock_string_access.in_ = MagicMock(return_value=MagicMock())
-
-        # Create mock for float access (for numeric comparisons)
-        mock_float_access = MagicMock()
-        mock_float_access.__eq__ = MagicMock(return_value=MagicMock())
-        mock_float_access.__ne__ = MagicMock(return_value=MagicMock())
-        mock_float_access.__lt__ = MagicMock(return_value=MagicMock())
-        mock_float_access.__gt__ = MagicMock(return_value=MagicMock())
-        mock_float_access.__le__ = MagicMock(return_value=MagicMock())
-        mock_float_access.__ge__ = MagicMock(return_value=MagicMock())
-
-        # Create mock for null checks
-        mock_null_access = MagicMock()
-        mock_null_access.is_ = MagicMock(return_value=MagicMock())
-        mock_null_access.isnot = MagicMock(return_value=MagicMock())
-
-        # Setup __getitem__ to return appropriate mock based on usage
-        def getitem_side_effect(name):
-            if name in ["author", "title", "category"]:
-                return mock_string_access
-            elif name in ["year", "price", "rating"]:
-                return mock_float_access
-            elif name == "description":
-                return mock_null_access
-            else:
-                return mock_string_access
-
-        mock_metadata_field.__getitem__ = MagicMock(side_effect=getitem_side_effect)
-        mock_metadata_field.as_string.return_value = mock_string_access
-        mock_metadata_field.as_float.return_value = mock_float_access
-
-        return mock_metadata_field
 
     # ==================== String Condition Tests ====================
 
@@ -3566,7 +3619,7 @@ class TestProcessMetadataFilterFunc:
         - Existing filters in the list are not removed
         - New filters are appended to the list
         """
-        existing_filter = MagicMock()
+        existing_filter = object()
         filters = [existing_filter]
         sequence = 0
         condition = "contains"
@@ -3727,7 +3780,7 @@ class TestKnowledgeRetrievalRegression:
         dataset.provider = "dify"
         return dataset
 
-    def test_multiple_retrieve_reranking_with_app_context(self, mock_dataset):
+    def test_multiple_retrieve_reranking_with_app_context(self, mock_dataset, retrieval_session):
         """
         Repro test for current bug:
         reranking runs after `with flask_app.app_context():` exits.
@@ -3795,7 +3848,7 @@ class TestKnowledgeRetrievalRegression:
                     "core.rag.retrieval.dataset_retrieval.DataPostProcessor",
                     ContextRequiredPostProcessor,
                 ),
-                _patched_retriever_session(),
+                _patched_retriever_session(retrieval_session),
             ):
                 dataset_retrieval._multiple_retrieve_thread(
                     flask_app=flask_app,
@@ -3829,11 +3882,11 @@ class TestKnowledgeRetrievalRegression:
         # Current buggy code should record an exception (not raise it)
         assert not thread_exceptions, thread_exceptions
 
-    def test_run_retriever_thread_provides_session_to_retriever(self):
+    def test_run_retriever_thread_provides_session_to_retriever(self, retrieval_session):
         dataset_retrieval = DatasetRetrieval()
         all_documents: list[Document] = []
 
-        with _patched_retriever_session() as session:
+        with _patched_retriever_session(retrieval_session) as session:
             with patch.object(dataset_retrieval, "_retriever") as mock_retriever:
                 dataset_retrieval._run_retriever_thread(
                     flask_app=_FakeFlaskApp(),
@@ -3851,14 +3904,14 @@ class TestKnowledgeRetrievalRegression:
         mock_retriever.assert_called_once()
         assert mock_retriever.call_args.kwargs["session"] is session
 
-    def test_run_retriever_thread_records_retriever_exception(self):
+    def test_run_retriever_thread_records_retriever_exception(self, retrieval_session):
         dataset_retrieval = DatasetRetrieval()
         all_documents: list[Document] = []
         cancel_event = threading.Event()
         thread_exceptions: list[Exception] = []
         expected_error = RuntimeError("retrieval failed")
 
-        with _patched_retriever_session():
+        with _patched_retriever_session(retrieval_session):
             with patch.object(dataset_retrieval, "_retriever", side_effect=expected_error):
                 dataset_retrieval._run_retriever_thread(
                     flask_app=_FakeFlaskApp(),
@@ -3982,66 +4035,85 @@ class TestDatasetRetrievalAdditionalHelpers:
         retrieval._send_trace_task("m1", docs, {"cost": 1})
         trace_manager.add_trace_task.assert_not_called()
 
-    def test_on_query(self, retrieval: DatasetRetrieval) -> None:
-        db_mock = Mock()
-        audit_session = MagicMock()
-        session_factory = MagicMock()
-        session_factory.begin.return_value.__enter__.return_value = audit_session
-
-        with (
-            patch("core.rag.retrieval.dataset_retrieval.db", db_mock),
-            patch(
-                "core.rag.retrieval.dataset_retrieval.sessionmaker", return_value=session_factory
-            ) as sessionmaker_mock,
+    def test_on_query(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
+        dataset_ids = [str(uuid4()), str(uuid4())]
+        app_id = str(uuid4())
+        user_id = str(uuid4())
+        with patch(
+            "core.rag.retrieval.dataset_retrieval.db",
+            SimpleNamespace(engine=retrieval_session.get_bind()),
         ):
             retrieval._on_query(
                 query=None,
                 attachment_ids=None,
-                dataset_ids=["d1"],
-                app_id="a1",
+                dataset_ids=dataset_ids,
+                app_id=app_id,
                 user_from="account",
-                user_id="u1",
+                user_id=user_id,
             )
-            audit_session.add_all.assert_not_called()
+            assert retrieval_session.scalars(select(DatasetQuery)).all() == []
 
             retrieval._on_query(
                 query="python",
-                attachment_ids=["f1"],
-                dataset_ids=["d1", "d2"],
-                app_id="a1",
+                attachment_ids=[str(uuid4())],
+                dataset_ids=dataset_ids,
+                app_id=app_id,
                 user_from="account",
-                user_id="u1",
+                user_id=user_id,
             )
-            sessionmaker_mock.assert_called_once_with(bind=db_mock.engine, expire_on_commit=False)
-            audit_session.add_all.assert_called_once()
-            added_queries = audit_session.add_all.call_args.args[0]
-            assert len(added_queries) == 2
-            db_mock.session.commit.assert_not_called()
+            added_queries = retrieval_session.scalars(select(DatasetQuery)).all()
+            assert {item.dataset_id for item in added_queries} == set(dataset_ids)
+            assert all(item.created_by_role == CreatorUserRole.ACCOUNT for item in added_queries)
 
-    def test_on_query_normalizes_workflow_end_user_role(self, retrieval: DatasetRetrieval) -> None:
-        db_mock = Mock()
-        audit_session = MagicMock()
-        session_factory = MagicMock()
-        session_factory.begin.return_value.__enter__.return_value = audit_session
-
-        with (
-            patch("core.rag.retrieval.dataset_retrieval.db", db_mock),
-            patch("core.rag.retrieval.dataset_retrieval.sessionmaker", return_value=session_factory),
+    def test_on_query_normalizes_workflow_end_user_role(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
+        dataset_id = str(uuid4())
+        with patch(
+            "core.rag.retrieval.dataset_retrieval.db",
+            SimpleNamespace(engine=retrieval_session.get_bind()),
         ):
             retrieval._on_query(
                 query="python",
                 attachment_ids=None,
-                dataset_ids=["d1"],
-                app_id="a1",
+                dataset_ids=[dataset_id],
+                app_id=str(uuid4()),
                 user_from="end-user",
-                user_id="u1",
+                user_id=str(uuid4()),
             )
 
-            audit_session.add_all.assert_called_once()
-            added_queries = audit_session.add_all.call_args.args[0]
-
+            added_queries = retrieval_session.scalars(select(DatasetQuery)).all()
             assert len(added_queries) == 1
             assert added_queries[0].created_by_role == CreatorUserRole.END_USER
+
+    def test_on_query_rolls_back_when_insert_fails(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
+        engine = retrieval_session.get_bind()
+
+        def fail_dataset_query_insert(_conn, _cursor, statement, _parameters, _context, _executemany):
+            if statement.lstrip().startswith("INSERT INTO dataset_queries"):
+                raise RuntimeError("audit insert failed")
+
+        event.listen(engine, "before_cursor_execute", fail_dataset_query_insert)
+        try:
+            with patch(
+                "core.rag.retrieval.dataset_retrieval.db",
+                SimpleNamespace(engine=engine),
+            ):
+                with pytest.raises(RuntimeError, match="audit insert failed"):
+                    retrieval._on_query(
+                        query="python",
+                        attachment_ids=None,
+                        dataset_ids=[str(uuid4())],
+                        app_id=str(uuid4()),
+                        user_from="account",
+                        user_id=str(uuid4()),
+                    )
+        finally:
+            event.remove(engine, "before_cursor_execute", fail_dataset_query_insert)
+
+        assert retrieval_session.scalars(select(DatasetQuery)).all() == []
 
     def test_handle_invoke_result(self, retrieval: DatasetRetrieval) -> None:
         usage = LLMUsage.empty_usage()
@@ -4191,8 +4263,17 @@ class TestDatasetRetrievalAdditionalHelpers:
             assert config.stop == ["END"]
             assert "stop" not in config.parameters
 
-    def test_automatic_metadata_filter_func(self, retrieval: DatasetRetrieval) -> None:
-        metadata_field = SimpleNamespace(name="author")
+    def test_automatic_metadata_filter_func(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
+        dataset_id = str(uuid4())
+        metadata_field = DatasetMetadata(
+            tenant_id=str(uuid4()),
+            dataset_id=dataset_id,
+            type="string",
+            name="author",
+            created_by=str(uuid4()),
+        )
+        retrieval_session.add(metadata_field)
+        retrieval_session.commit()
         model_instance = Mock()
         model_instance.invoke_llm.return_value = iter([Mock()])
         model_config = ModelConfigWithCredentialsEntity.model_construct(
@@ -4206,11 +4287,6 @@ class TestDatasetRetrievalAdditionalHelpers:
             stop=[],
         )
         usage = LLMUsage.from_metadata({"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
-        session_scalars = Mock()
-        session_scalars.all.return_value = [metadata_field]
-        session = MagicMock()
-        session.scalars.return_value = session_scalars
-
         with (
             patch.object(retrieval, "_fetch_model_config", return_value=(model_instance, model_config)),
             patch.object(retrieval, "_get_prompt_template", return_value=(["prompt"], [])),
@@ -4233,8 +4309,8 @@ class TestDatasetRetrievalAdditionalHelpers:
                 ]
             }
             result = retrieval._automatic_metadata_filter_func(
-                session,
-                dataset_ids=["d1"],
+                retrieval_session,
+                dataset_ids=[dataset_id],
                 query="python",
                 tenant_id="tenant-1",
                 user_id="u1",
@@ -4249,23 +4325,30 @@ class TestDatasetRetrievalAdditionalHelpers:
         ):
             with pytest.raises(RuntimeError, match="boom"):
                 retrieval._automatic_metadata_filter_func(
-                    session,
-                    dataset_ids=["d1"],
+                    retrieval_session,
+                    dataset_ids=[dataset_id],
                     query="python",
                     tenant_id="tenant-1",
                     user_id="u1",
                     metadata_model_config=AppModelConfig(provider="openai", name="gpt", mode="chat"),
                 )
 
-    def test_get_metadata_filter_condition(self, retrieval: DatasetRetrieval) -> None:
-        scalars_result = Mock()
-        scalars_result.all.return_value = [SimpleNamespace(dataset_id="d1", id="doc-1")]
-        session = MagicMock()
-        session.scalars.return_value = scalars_result
+    def test_get_metadata_filter_condition(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
+        tenant_id = str(uuid4())
+        dataset_id = str(uuid4())
+        document_id = str(uuid4())
+        _persist_dataset(retrieval_session, dataset_id=dataset_id, tenant_id=tenant_id)
+        _persist_document(
+            retrieval_session,
+            document_id=document_id,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
+        ).doc_metadata = {"author": "Alice"}
+        retrieval_session.commit()
 
         mapping, condition = retrieval.get_metadata_filter_condition(
-            session,
-            dataset_ids=["d1"],
+            retrieval_session,
+            dataset_ids=[dataset_id],
             query="python",
             tenant_id="tenant-1",
             user_id="u1",
@@ -4282,8 +4365,8 @@ class TestDatasetRetrievalAdditionalHelpers:
             patch.object(retrieval, "_automatic_metadata_filter_func", return_value=automatic_filters),
         ):
             mapping, condition = retrieval.get_metadata_filter_condition(
-                session,
-                dataset_ids=["d1"],
+                retrieval_session,
+                dataset_ids=[dataset_id],
                 query="python",
                 tenant_id="tenant-1",
                 user_id="u1",
@@ -4292,7 +4375,7 @@ class TestDatasetRetrievalAdditionalHelpers:
                 metadata_filtering_conditions=AppMetadataFilteringCondition(logical_operator="or", conditions=[]),
                 inputs={},
             )
-        assert mapping == {"d1": ["doc-1"]}
+        assert mapping == {dataset_id: [document_id]}
         assert condition is not None
         assert condition.logical_operator == "or"
 
@@ -4301,8 +4384,8 @@ class TestDatasetRetrievalAdditionalHelpers:
             conditions=[AppCondition(name="author", comparison_operator="contains", value="{{name}}")],
         )
         mapping, condition = retrieval.get_metadata_filter_condition(
-            session,
-            dataset_ids=["d1"],
+            retrieval_session,
+            dataset_ids=[dataset_id],
             query="python",
             tenant_id="tenant-1",
             user_id="u1",
@@ -4311,7 +4394,7 @@ class TestDatasetRetrievalAdditionalHelpers:
             metadata_filtering_conditions=manual_conditions,
             inputs={"name": "Alice"},
         )
-        assert mapping == {"d1": ["doc-1"]}
+        assert mapping == {dataset_id: [document_id]}
         assert condition is not None
         assert condition.conditions
         first_condition = condition.conditions[0]
@@ -4319,8 +4402,8 @@ class TestDatasetRetrievalAdditionalHelpers:
 
         with pytest.raises(ValueError, match="Invalid metadata filtering mode"):
             retrieval.get_metadata_filter_condition(
-                session,
-                dataset_ids=["d1"],
+                retrieval_session,
+                dataset_ids=[dataset_id],
                 query="python",
                 tenant_id="tenant-1",
                 user_id="u1",
@@ -4330,22 +4413,38 @@ class TestDatasetRetrievalAdditionalHelpers:
                 inputs={},
             )
 
-    def test_get_available_datasets(self, retrieval: DatasetRetrieval) -> None:
-        session = Mock()
-        scalars_result = Mock()
-        scalars_result.all.return_value = [SimpleNamespace(id="d1"), None, SimpleNamespace(id="d2")]
-        session.scalars.return_value = scalars_result
+    def test_get_available_datasets(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
+        tenant_id = str(uuid4())
+        document_dataset_id = str(uuid4())
+        external_dataset_id = str(uuid4())
+        unavailable_dataset_id = str(uuid4())
+        foreign_dataset_id = str(uuid4())
+        _persist_dataset(retrieval_session, dataset_id=document_dataset_id, tenant_id=tenant_id)
+        _persist_dataset(
+            retrieval_session,
+            dataset_id=external_dataset_id,
+            tenant_id=tenant_id,
+            provider="external",
+        )
+        _persist_dataset(retrieval_session, dataset_id=unavailable_dataset_id, tenant_id=tenant_id)
+        _persist_dataset(retrieval_session, dataset_id=foreign_dataset_id, tenant_id=str(uuid4()))
+        _persist_document(
+            retrieval_session,
+            document_id=str(uuid4()),
+            dataset_id=document_dataset_id,
+            tenant_id=tenant_id,
+        )
+        retrieval_session.commit()
 
-        session_ctx = MagicMock()
-        session_ctx.__enter__.return_value = session
-        session_ctx.__exit__.return_value = False
+        with _patched_retriever_session(retrieval_session):
+            available = retrieval._get_available_datasets(
+                tenant_id,
+                [document_dataset_id, external_dataset_id, unavailable_dataset_id, foreign_dataset_id],
+            )
 
-        with patch("core.rag.retrieval.dataset_retrieval.session_factory.create_session", return_value=session_ctx):
-            available = retrieval._get_available_datasets("tenant-1", ["d1", "d2"])
+        assert {dataset.id for dataset in available} == {document_dataset_id, external_dataset_id}
 
-        assert [dataset.id for dataset in available] == ["d1", "d2"]
-
-    def test_check_knowledge_rate_limit(self, retrieval: DatasetRetrieval) -> None:
+    def test_check_knowledge_rate_limit(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
         with (
             patch("core.rag.retrieval.dataset_retrieval.FeatureService.get_knowledge_rate_limit") as mock_limit,
             patch("core.rag.retrieval.dataset_retrieval.redis_client") as mock_redis,
@@ -4356,22 +4455,20 @@ class TestDatasetRetrievalAdditionalHelpers:
             retrieval._check_knowledge_rate_limit("tenant-1")
             mock_redis.zadd.assert_called_once()
 
-        session = Mock()
-        session_ctx = MagicMock()
-        session_ctx.__enter__.return_value = session
-        session_ctx.__exit__.return_value = False
-
         with (
             patch("core.rag.retrieval.dataset_retrieval.FeatureService.get_knowledge_rate_limit") as mock_limit,
             patch("core.rag.retrieval.dataset_retrieval.redis_client") as mock_redis,
             patch("core.rag.retrieval.dataset_retrieval.time.time", return_value=100.0),
-            patch("core.rag.retrieval.dataset_retrieval.session_factory.create_session", return_value=session_ctx),
+            patch(
+                "core.rag.retrieval.dataset_retrieval.session_factory.create_session",
+                return_value=nullcontext(retrieval_session),
+            ),
         ):
             mock_limit.return_value = SimpleNamespace(enabled=True, limit=1, subscription_plan="pro")
             mock_redis.zcard.return_value = 2
             with pytest.raises(exc.RateLimitExceededError):
                 retrieval._check_knowledge_rate_limit("tenant-1")
-            session.add.assert_called_once()
+            assert any(isinstance(item, RateLimitLog) for item in retrieval_session.new)
 
         with patch("core.rag.retrieval.dataset_retrieval.FeatureService.get_knowledge_rate_limit") as mock_limit:
             mock_limit.return_value = SimpleNamespace(enabled=False)
@@ -4447,7 +4544,7 @@ class TestKnowledgeRetrievalCoverage:
     def retrieval(self) -> DatasetRetrieval:
         return DatasetRetrieval()
 
-    def test_returns_empty_when_query_missing(self, retrieval: DatasetRetrieval) -> None:
+    def test_returns_empty_when_query_missing(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
         request = KnowledgeRetrievalRequest(
             tenant_id="tenant-1",
             user_id="user-1",
@@ -4461,9 +4558,11 @@ class TestKnowledgeRetrievalCoverage:
             patch.object(retrieval, "_check_knowledge_rate_limit"),
             patch.object(retrieval, "_get_available_datasets", return_value=[SimpleNamespace(id="d1")]),
         ):
-            assert retrieval.knowledge_retrieval(MagicMock(), request) == []
+            assert retrieval.knowledge_retrieval(retrieval_session, request) == []
 
-    def test_raises_when_metadata_model_config_missing(self, retrieval: DatasetRetrieval) -> None:
+    def test_raises_when_metadata_model_config_missing(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
         request = KnowledgeRetrievalRequest(
             tenant_id="tenant-1",
             user_id="user-1",
@@ -4480,7 +4579,7 @@ class TestKnowledgeRetrievalCoverage:
             patch.object(retrieval, "_get_available_datasets", return_value=[SimpleNamespace(id="d1")]),
         ):
             with pytest.raises(ValueError, match="metadata_model_config is required"):
-                retrieval.knowledge_retrieval(MagicMock(), request)
+                retrieval.knowledge_retrieval(retrieval_session, request)
 
     @pytest.mark.parametrize(
         ("status", "error_cls"),
@@ -4495,6 +4594,7 @@ class TestKnowledgeRetrievalCoverage:
         retrieval: DatasetRetrieval,
         status: ModelStatus,
         error_cls: str,
+        retrieval_session: Session,
     ) -> None:
         request = KnowledgeRetrievalRequest(
             tenant_id="tenant-1",
@@ -4523,7 +4623,7 @@ class TestKnowledgeRetrievalCoverage:
         ):
             mock_model_manager.return_value.get_model_instance.return_value = model_instance
             with pytest.raises(Exception) as exc_info:
-                retrieval.knowledge_retrieval(MagicMock(), request)
+                retrieval.knowledge_retrieval(retrieval_session, request)
             mock_model_manager.assert_called_once_with(tenant_id="tenant-1", user_id="user-1")
             assert error_cls in type(exc_info.value).__name__
 
@@ -4548,7 +4648,7 @@ class TestRetrieveCoverage:
             stop=[],
         )
 
-    def test_returns_none_when_dataset_ids_empty(self, retrieval: DatasetRetrieval) -> None:
+    def test_returns_none_when_dataset_ids_empty(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
         config = DatasetEntity(
             dataset_ids=[],
             retrieve_config=DatasetRetrieveConfigEntity(
@@ -4556,7 +4656,7 @@ class TestRetrieveCoverage:
             ),
         )
         result = retrieval.retrieve(
-            MagicMock(),
+            retrieval_session,
             app_id="app-1",
             user_id="user-1",
             tenant_id="tenant-1",
@@ -4570,7 +4670,9 @@ class TestRetrieveCoverage:
         )
         assert result == (None, [])
 
-    def test_returns_none_when_model_schema_missing(self, retrieval: DatasetRetrieval) -> None:
+    def test_returns_none_when_model_schema_missing(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
         config = DatasetEntity(
             dataset_ids=["d1"],
             retrieve_config=DatasetRetrieveConfigEntity(
@@ -4586,7 +4688,7 @@ class TestRetrieveCoverage:
         with patch("core.rag.retrieval.dataset_retrieval.ModelManager.for_tenant") as mock_model_manager:
             mock_model_manager.return_value.get_model_instance.return_value = model_instance
             result = retrieval.retrieve(
-                MagicMock(),
+                retrieval_session,
                 app_id="app-1",
                 user_id="user-1",
                 tenant_id="tenant-1",
@@ -4602,7 +4704,7 @@ class TestRetrieveCoverage:
         assert result == (None, [])
 
     def test_retrieve_uses_bound_model_instance_schema_and_updates_model_config(
-        self, retrieval: DatasetRetrieval
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
     ) -> None:
         config = DatasetEntity(
             dataset_ids=["d1"],
@@ -4629,7 +4731,7 @@ class TestRetrieveCoverage:
         ):
             mock_model_manager.return_value.get_model_instance.return_value = bound_model_instance
             context, files = retrieval.retrieve(
-                MagicMock(),
+                retrieval_session,
                 app_id="app-1",
                 user_id="user-1",
                 tenant_id="tenant-1",
@@ -4651,7 +4753,9 @@ class TestRetrieveCoverage:
         assert context == ""
         assert files == []
 
-    def test_single_strategy_with_external_documents(self, retrieval: DatasetRetrieval) -> None:
+    def test_single_strategy_with_external_documents(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
         retrieve_config = DatasetRetrieveConfigEntity(
             retrieve_strategy=DatasetRetrieveConfigEntity.RetrieveStrategy.SINGLE,
             metadata_filtering_mode="disabled",
@@ -4679,7 +4783,7 @@ class TestRetrieveCoverage:
             bound_model_instance.model_type_instance.get_model_schema.return_value = SimpleNamespace(features=[])
             mock_model_manager.return_value.get_model_instance.return_value = bound_model_instance
             context, files = retrieval.retrieve(
-                MagicMock(),
+                retrieval_session,
                 app_id="app-1",
                 user_id="user-1",
                 tenant_id="tenant-1",
@@ -4694,7 +4798,14 @@ class TestRetrieveCoverage:
         assert context == "external content"
         assert files == []
 
-    def test_multiple_strategy_with_vision_and_source_details(self, retrieval: DatasetRetrieval) -> None:
+    def test_multiple_strategy_with_vision_and_source_details(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
+        tenant_id = str(uuid4())
+        dataset_id = str(uuid4())
+        document_id = str(uuid4())
+        segment_id = str(uuid4())
+        upload_file_id = str(uuid4())
         retrieve_config = DatasetRetrieveConfigEntity(
             retrieve_strategy=DatasetRetrieveConfigEntity.RetrieveStrategy.MULTIPLE,
             top_k=4,
@@ -4704,7 +4815,7 @@ class TestRetrieveCoverage:
             reranking_enabled=True,
             metadata_filtering_mode="disabled",
         )
-        config = DatasetEntity(dataset_ids=["d1"], retrieve_config=retrieve_config)
+        config = DatasetEntity(dataset_ids=[dataset_id], retrieve_config=retrieve_config)
         model_config = self._build_model_config(features=[ModelFeature.TOOL_CALL])
         external_doc = _doc(
             provider="external",
@@ -4719,16 +4830,16 @@ class TestRetrieveCoverage:
             provider="dify",
             content="dify body",
             score=0.9,
-            dataset_id="d1",
-            document_id="doc-1",
+            dataset_id=dataset_id,
+            document_id=document_id,
             doc_id="node-1",
         )
         record = SimpleNamespace(
             segment=SimpleNamespace(
-                id="segment-1",
-                dataset_id="d1",
-                document_id="doc-1",
-                tenant_id="tenant-1",
+                id=segment_id,
+                dataset_id=dataset_id,
+                document_id=document_id,
+                tenant_id=tenant_id,
                 hit_count=3,
                 word_count=11,
                 position=1,
@@ -4741,32 +4852,60 @@ class TestRetrieveCoverage:
             summary="short summary",
             files=None,
         )
-        dataset_item = SimpleNamespace(id="d1", name="Dataset One")
-        document_item = SimpleNamespace(
-            id="doc-1",
-            name="Document One",
-            data_source_type="upload_file",
-            doc_metadata={"lang": "en"},
+        _persist_dataset(
+            retrieval_session,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
+            name="Dataset One",
         )
-        upload_file = SimpleNamespace(
-            id="file-1",
+        _persist_document(
+            retrieval_session,
+            document_id=document_id,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
+            name="Document One",
+        ).doc_metadata = {"lang": "en"}
+        upload_file = UploadFile(
+            tenant_id=tenant_id,
+            storage_type=StorageType.LOCAL,
+            key="k1",
             name="image",
+            size=123,
             extension="png",
             mime_type="image/png",
+            created_by_role=CreatorUserRole.ACCOUNT,
+            created_by=str(uuid4()),
+            created_at=datetime(2026, 1, 1),
+            used=True,
             source_url="https://example.com/img.png",
-            size=123,
-            key="k1",
         )
-        execute_attachments = SimpleNamespace(all=lambda: [(SimpleNamespace(), upload_file)])
-        execute_docs = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [document_item]))
-        execute_datasets = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [dataset_item]))
+        upload_file.id = upload_file_id
+        summary = DocumentSegmentSummary(
+            dataset_id=dataset_id,
+            document_id=document_id,
+            chunk_id=segment_id,
+            summary_content="short summary",
+        )
+        record.summary = summary.summary_content
+        retrieval_session.add_all(
+            [
+                upload_file,
+                summary,
+                SegmentAttachmentBinding(
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                    document_id=document_id,
+                    segment_id=segment_id,
+                    attachment_id=upload_file_id,
+                ),
+            ]
+        )
+        retrieval_session.commit()
         hit_callback = Mock()
-        session = MagicMock()
-        session.execute.side_effect = [execute_attachments, execute_docs, execute_datasets]
 
         with (
             patch("core.rag.retrieval.dataset_retrieval.ModelManager.for_tenant") as mock_model_manager,
-            patch.object(retrieval, "_get_available_datasets", return_value=[SimpleNamespace(id="d1")]),
+            patch.object(retrieval, "_get_available_datasets", return_value=[SimpleNamespace(id=dataset_id)]),
             patch.object(retrieval, "get_metadata_filter_condition", return_value=(None, None)),
             patch.object(retrieval, "multiple_retrieve", return_value=[external_doc, dify_doc]),
             patch(
@@ -4784,10 +4923,10 @@ class TestRetrieveCoverage:
             )
             mock_model_manager.return_value.get_model_instance.return_value = bound_model_instance
             context, files = retrieval.retrieve(
-                session,
+                retrieval_session,
                 app_id="app-1",
                 user_id="user-1",
-                tenant_id="tenant-1",
+                tenant_id=tenant_id,
                 model_config=model_config,
                 config=config,
                 query="python",
@@ -4809,20 +4948,20 @@ class TestSingleAndMultipleRetrieveCoverage:
     def retrieval(self) -> DatasetRetrieval:
         return DatasetRetrieval()
 
-    def test_single_retrieve_external_path(self, retrieval: DatasetRetrieval) -> None:
-        dataset = _dataset(
-            id="ds-1",
+    def test_single_retrieve_external_path(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
+        tenant_id = str(uuid4())
+        dataset_id = str(uuid4())
+        dataset = _persist_dataset(
+            retrieval_session,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
             name="External DS",
-            description=None,
             provider="external",
-            tenant_id="tenant-1",
-            retrieval_model={"top_k": 2},
-            indexing_technique="high_quality",
         )
+        dataset.retrieval_model = {"top_k": 2}
+        retrieval_session.commit()
         app = Flask(__name__)
         usage = LLMUsage.from_metadata({"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
-        session = MagicMock()
-        session.scalar.return_value = dataset
         with app.app_context():
             with (
                 patch("core.rag.retrieval.dataset_retrieval.ReactMultiDatasetRouter") as mock_router_cls,
@@ -4833,14 +4972,14 @@ class TestSingleAndMultipleRetrieveCoverage:
                 patch.object(retrieval, "_on_retrieval_end") as mock_end,
                 patch.object(retrieval, "_on_query"),
             ):
-                mock_router_cls.return_value.invoke.return_value = ("ds-1", usage)
+                mock_router_cls.return_value.invoke.return_value = (dataset_id, usage)
                 mock_external.return_value = [
                     {"content": "ext result", "metadata": {"k": "v"}, "score": 0.9, "title": "Ext Doc"}
                 ]
                 result = retrieval.single_retrieve(
-                    session,
+                    retrieval_session,
                     app_id="app-1",
-                    tenant_id="tenant-1",
+                    tenant_id=tenant_id,
                     user_id="user-1",
                     user_from="workflow",
                     query="python",
@@ -4856,30 +4995,34 @@ class TestSingleAndMultipleRetrieveCoverage:
         mock_end.assert_called_once()
         assert retrieval.llm_usage.total_tokens == 2
 
-    def test_single_retrieve_dify_path_and_filters(self, retrieval: DatasetRetrieval) -> None:
-        dataset = _dataset(
-            id="ds-1",
+    def test_single_retrieve_dify_path_and_filters(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
+        tenant_id = str(uuid4())
+        dataset_id = str(uuid4())
+        document_id = str(uuid4())
+        dataset = _persist_dataset(
+            retrieval_session,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
             name="Internal DS",
-            description="dataset desc",
             provider="dify",
-            tenant_id="tenant-1",
-            indexing_technique="high_quality",
-            retrieval_model={
-                "search_method": "semantic_search",
-                "reranking_enable": True,
-                "reranking_model": {"reranking_provider_name": "cohere", "reranking_model_name": "rerank"},
-                "reranking_mode": "reranking_model",
-                "weights": {"vector_setting": {}},
-                "top_k": 3,
-                "score_threshold_enabled": True,
-                "score_threshold": 0.2,
-            },
         )
+        dataset.description = "dataset desc"
+        dataset.retrieval_model = {
+            "search_method": "semantic_search",
+            "reranking_enable": True,
+            "reranking_model": {"reranking_provider_name": "cohere", "reranking_model_name": "rerank"},
+            "reranking_mode": "reranking_model",
+            "weights": {"vector_setting": {}},
+            "top_k": 3,
+            "score_threshold_enabled": True,
+            "score_threshold": 0.2,
+        }
+        retrieval_session.commit()
         app = Flask(__name__)
         usage = LLMUsage.from_metadata({"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
-        result_doc = _doc(provider="dify", score=0.7, dataset_id="ds-1", document_id="doc-1", doc_id="node-1")
-        session = MagicMock()
-        session.scalar.return_value = dataset
+        result_doc = _doc(provider="dify", score=0.7, dataset_id=dataset_id, document_id=document_id, doc_id="node-1")
         with app.app_context():
             with (
                 patch("core.rag.retrieval.dataset_retrieval.FunctionCallMultiDatasetRouter") as mock_router_cls,
@@ -4890,11 +5033,11 @@ class TestSingleAndMultipleRetrieveCoverage:
                 patch.object(retrieval, "_on_retrieval_end"),
                 patch.object(retrieval, "_on_query"),
             ):
-                mock_router_cls.return_value.invoke.return_value = ("ds-1", usage)
+                mock_router_cls.return_value.invoke.return_value = (dataset_id, usage)
                 results = retrieval.single_retrieve(
-                    session,
+                    retrieval_session,
                     app_id="app-1",
-                    tenant_id="tenant-1",
+                    tenant_id=tenant_id,
                     user_id="user-1",
                     user_from="workflow",
                     query="python",
@@ -4902,19 +5045,21 @@ class TestSingleAndMultipleRetrieveCoverage:
                     model_instance=Mock(),
                     model_config=Mock(),
                     planning_strategy=PlanningStrategy.ROUTER,
-                    metadata_filter_document_ids={"ds-1": ["doc-1"]},
+                    metadata_filter_document_ids={dataset_id: [document_id]},
                     metadata_condition=_metadata_condition(),
                 )
 
         assert results == [result_doc]
-        assert mock_retrieve.call_args.kwargs["document_ids_filter"] == ["doc-1"]
+        assert mock_retrieve.call_args.kwargs["document_ids_filter"] == [document_id]
         assert retrieval.llm_usage.total_tokens == 1
 
-    def test_single_retrieve_returns_empty_when_no_dataset_selected(self, retrieval: DatasetRetrieval) -> None:
+    def test_single_retrieve_returns_empty_when_no_dataset_selected(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
         with patch("core.rag.retrieval.dataset_retrieval.ReactMultiDatasetRouter") as mock_router_cls:
             mock_router_cls.return_value.invoke.return_value = (None, LLMUsage.empty_usage())
             results = retrieval.single_retrieve(
-                MagicMock(),
+                retrieval_session,
                 app_id="app-1",
                 tenant_id="tenant-1",
                 user_id="user-1",
@@ -4929,26 +5074,29 @@ class TestSingleAndMultipleRetrieveCoverage:
             )
         assert results == []
 
-    def test_single_retrieve_respects_metadata_filter_shortcuts(self, retrieval: DatasetRetrieval) -> None:
-        dataset = _dataset(
-            id="ds-1",
+    def test_single_retrieve_respects_metadata_filter_shortcuts(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
+        tenant_id = str(uuid4())
+        dataset_id = str(uuid4())
+        dataset = _persist_dataset(
+            retrieval_session,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
             name="Internal DS",
-            description="desc",
             provider="dify",
-            tenant_id="tenant-1",
-            indexing_technique="high_quality",
-            retrieval_model={"top_k": 2, "search_method": "semantic_search", "reranking_enable": False},
         )
+        dataset.description = "desc"
+        dataset.retrieval_model = {"top_k": 2, "search_method": "semantic_search", "reranking_enable": False}
+        retrieval_session.commit()
         with (
             patch("core.rag.retrieval.dataset_retrieval.ReactMultiDatasetRouter") as mock_router_cls,
         ):
-            session = MagicMock()
-            session.scalar.return_value = dataset
-            mock_router_cls.return_value.invoke.return_value = ("ds-1", LLMUsage.empty_usage())
+            mock_router_cls.return_value.invoke.return_value = (dataset_id, LLMUsage.empty_usage())
             no_filter = retrieval.single_retrieve(
-                session,
+                retrieval_session,
                 app_id="app-1",
-                tenant_id="tenant-1",
+                tenant_id=tenant_id,
                 user_id="user-1",
                 user_from="workflow",
                 query="python",
@@ -4960,9 +5108,9 @@ class TestSingleAndMultipleRetrieveCoverage:
                 metadata_condition=_metadata_condition(),
             )
             missing_doc_ids = retrieval.single_retrieve(
-                session,
+                retrieval_session,
                 app_id="app-1",
-                tenant_id="tenant-1",
+                tenant_id=tenant_id,
                 user_id="user-1",
                 user_from="workflow",
                 query="python",
@@ -5156,74 +5304,134 @@ class TestInternalHooksCoverage:
             )
         mock_trace.assert_called_once()
 
-    def test_on_retrieval_end_dify_without_document_ids(self, retrieval: DatasetRetrieval) -> None:
+    def test_on_retrieval_end_dify_without_document_ids(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
         app = Flask(__name__)
         doc = Document(page_content="x", metadata={"doc_id": "n1"}, provider="dify")
         with (
-            patch("core.rag.retrieval.dataset_retrieval.db", SimpleNamespace(engine=Mock())),
+            patch(
+                "core.rag.retrieval.dataset_retrieval.db",
+                SimpleNamespace(engine=retrieval_session.get_bind()),
+            ),
             patch.object(retrieval, "_send_trace_task") as mock_trace,
         ):
             retrieval._on_retrieval_end(flask_app=app, documents=[doc], message_id="m1", timer={"cost": 1})
         mock_trace.assert_called_once()
 
-    def test_on_retrieval_end_updates_segments_for_text_and_image(self, retrieval: DatasetRetrieval) -> None:
+    def test_on_retrieval_end_updates_segments_for_text_and_image(
+        self, retrieval: DatasetRetrieval, retrieval_session: Session
+    ) -> None:
         app = Flask(__name__)
-        docs = [
-            _doc(provider="dify", document_id="doc-a", doc_id="idx-a", extra={"doc_type": "text"}),
-            _doc(provider="dify", document_id="doc-b", doc_id="att-b", extra={"doc_type": DocType.IMAGE}),
-            _doc(provider="dify", document_id="doc-c", doc_id="idx-c", extra={"doc_type": "text"}),
-            _doc(provider="dify", document_id="doc-d", doc_id="att-d", extra={"doc_type": DocType.IMAGE}),
-        ]
+        tenant_id = str(uuid4())
+        dataset_id = str(uuid4())
+        _persist_dataset(retrieval_session, dataset_id=dataset_id, tenant_id=tenant_id)
+        document_ids = [str(uuid4()) for _ in range(4)]
+        segment_ids = [str(uuid4()) for _ in range(4)]
+        attachment_ids = [str(uuid4()), str(uuid4())]
         dataset_docs = [
-            SimpleNamespace(id="doc-a", doc_form=IndexStructureType.PARENT_CHILD_INDEX),
-            SimpleNamespace(id="doc-b", doc_form=IndexStructureType.PARENT_CHILD_INDEX),
-            SimpleNamespace(id="doc-c", doc_form=IndexStructureType.QA_INDEX),
-            SimpleNamespace(id="doc-d", doc_form=IndexStructureType.QA_INDEX),
+            _persist_document(
+                retrieval_session,
+                document_id=document_id,
+                dataset_id=dataset_id,
+                tenant_id=tenant_id,
+            )
+            for document_id in document_ids
         ]
-        child_chunks = [SimpleNamespace(index_node_id="idx-a", segment_id="seg-a")]
-        segments = [SimpleNamespace(index_node_id="idx-c", id="seg-c")]
-        bindings = [SimpleNamespace(segment_id="seg-b"), SimpleNamespace(segment_id="seg-d")]
-
-        def _scalars(items):
-            result = Mock()
-            result.all.return_value = items
-            return result
-
-        session = Mock()
-        session.scalars.side_effect = [
-            _scalars(dataset_docs),
-            _scalars(child_chunks),
-            _scalars(segments),
-            _scalars(bindings),
+        dataset_docs[0].doc_form = IndexStructureType.PARENT_CHILD_INDEX
+        dataset_docs[1].doc_form = IndexStructureType.PARENT_CHILD_INDEX
+        dataset_docs[2].doc_form = IndexStructureType.QA_INDEX
+        dataset_docs[3].doc_form = IndexStructureType.QA_INDEX
+        segments = [
+            _persist_segment(
+                retrieval_session,
+                segment_id=segment_id,
+                document_id=document_id,
+                dataset_id=dataset_id,
+                tenant_id=tenant_id,
+                index_node_id=index_node_id,
+            )
+            for segment_id, document_id, index_node_id in zip(
+                segment_ids,
+                document_ids,
+                ["parent-node", "parent-image", "normal-node", "normal-image"],
+            )
         ]
-        session_ctx = MagicMock()
-        session_ctx.__enter__.return_value = session
-        session_ctx.__exit__.return_value = False
-
-        sessionmaker_ctx = MagicMock()
-        sessionmaker_ctx.begin.return_value = session_ctx
+        child_chunk = ChildChunk(
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            document_id=document_ids[0],
+            segment_id=segment_ids[0],
+            position=1,
+            content="child content",
+            word_count=2,
+            created_by=str(uuid4()),
+            index_node_id="idx-a",
+        )
+        retrieval_session.add_all(
+            [
+                child_chunk,
+                SegmentAttachmentBinding(
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                    document_id=document_ids[1],
+                    segment_id=segment_ids[1],
+                    attachment_id=attachment_ids[0],
+                ),
+                SegmentAttachmentBinding(
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                    document_id=document_ids[3],
+                    segment_id=segment_ids[3],
+                    attachment_id=attachment_ids[1],
+                ),
+            ]
+        )
+        retrieval_session.commit()
+        docs = [
+            _doc(provider="dify", document_id=document_ids[0], doc_id="idx-a", extra={"doc_type": "text"}),
+            _doc(
+                provider="dify",
+                document_id=document_ids[1],
+                doc_id=attachment_ids[0],
+                extra={"doc_type": DocType.IMAGE},
+            ),
+            _doc(provider="dify", document_id=document_ids[2], doc_id="normal-node", extra={"doc_type": "text"}),
+            _doc(
+                provider="dify",
+                document_id=document_ids[3],
+                doc_id=attachment_ids[1],
+                extra={"doc_type": DocType.IMAGE},
+            ),
+        ]
 
         with (
-            patch("core.rag.retrieval.dataset_retrieval.db", SimpleNamespace(engine=Mock())),
-            patch("core.rag.retrieval.dataset_retrieval.sessionmaker", return_value=sessionmaker_ctx),
+            patch(
+                "core.rag.retrieval.dataset_retrieval.db",
+                SimpleNamespace(engine=retrieval_session.get_bind()),
+            ),
             patch.object(retrieval, "_send_trace_task") as mock_trace,
         ):
             retrieval._on_retrieval_end(flask_app=app, documents=docs, message_id="m1", timer={"cost": 1})
 
-        session.execute.assert_called_once()
+        retrieval_session.expire_all()
+        assert [segment.hit_count for segment in segments] == [1, 1, 1, 1]
         mock_trace.assert_called_once()
 
-    def test_retriever_variants(self, retrieval: DatasetRetrieval) -> None:
+    def test_retriever_variants(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
         flask_app = SimpleNamespace(app_context=lambda: nullcontext())
         all_documents: list[Document] = []
+        tenant_id = str(uuid4())
+        missing_dataset_id = str(uuid4())
+        external_dataset_id = str(uuid4())
+        economy_dataset_id = str(uuid4())
+        high_dataset_id = str(uuid4())
 
-        session = MagicMock()
-        session.scalar.return_value = None
         assert (
             retrieval._retriever(
                 flask_app=flask_app,  # type: ignore[arg-type]
-                session=session,
-                dataset_id="d1",
+                session=retrieval_session,
+                dataset_id=missing_dataset_id,
                 query="python",
                 top_k=1,
                 all_documents=all_documents,
@@ -5231,54 +5439,56 @@ class TestInternalHooksCoverage:
             == []
         )
 
-        external_dataset = SimpleNamespace(
-            id="ext-ds",
+        external_dataset = _persist_dataset(
+            retrieval_session,
+            dataset_id=external_dataset_id,
+            tenant_id=tenant_id,
             name="External",
             provider="external",
-            tenant_id="tenant-1",
-            retrieval_model={"top_k": 2},
-            indexing_technique="high_quality",
         )
+        external_dataset.retrieval_model = {"top_k": 2}
         with (
             patch(
                 "core.rag.retrieval.dataset_retrieval.ExternalDatasetService.fetch_external_knowledge_retrieval"
             ) as mock_external,
         ):
-            session = MagicMock()
-            session.scalar.return_value = external_dataset
             mock_external.return_value = [{"content": "e", "metadata": {}, "score": 0.8, "title": "Ext"}]
+            retrieval_session.commit()
             retrieval._retriever(
                 flask_app=flask_app,  # type: ignore[arg-type]
-                session=session,
-                dataset_id="ext-ds",
+                session=retrieval_session,
+                dataset_id=external_dataset_id,
                 query="python",
                 top_k=1,
                 all_documents=all_documents,
             )
 
-        economy_dataset = SimpleNamespace(
-            id="eco-ds",
+        economy_dataset = _persist_dataset(
+            retrieval_session,
+            dataset_id=economy_dataset_id,
+            tenant_id=tenant_id,
             provider="dify",
-            retrieval_model={"top_k": 1},
             indexing_technique="economy",
         )
-        high_dataset = SimpleNamespace(
-            id="hq-ds",
+        economy_dataset.retrieval_model = {"top_k": 1}
+        high_dataset = _persist_dataset(
+            retrieval_session,
+            dataset_id=high_dataset_id,
+            tenant_id=tenant_id,
             provider="dify",
-            retrieval_model={
-                "search_method": "semantic_search",
-                "top_k": 4,
-                "score_threshold": 0.3,
-                "score_threshold_enabled": True,
-                "reranking_enable": True,
-                "reranking_model": {"reranking_provider_name": "x", "reranking_model_name": "y"},
-                "reranking_mode": "reranking_model",
-                "weights": {"vector_setting": {}},
-            },
             indexing_technique="high_quality",
         )
-        session = MagicMock()
-        session.scalar.side_effect = [economy_dataset, high_dataset]
+        high_dataset.retrieval_model = {
+            "search_method": "semantic_search",
+            "top_k": 4,
+            "score_threshold": 0.3,
+            "score_threshold_enabled": True,
+            "reranking_enable": True,
+            "reranking_model": {"reranking_provider_name": "x", "reranking_model_name": "y"},
+            "reranking_mode": "reranking_model",
+            "weights": {"vector_setting": {}},
+        }
+        retrieval_session.commit()
         with (
             patch(
                 "core.rag.retrieval.dataset_retrieval.RetrievalService.retrieve", return_value=[_doc(provider="dify")]
@@ -5286,16 +5496,16 @@ class TestInternalHooksCoverage:
         ):
             retrieval._retriever(
                 flask_app=flask_app,  # type: ignore[arg-type]
-                session=session,
-                dataset_id="eco-ds",
+                session=retrieval_session,
+                dataset_id=economy_dataset_id,
                 query="python",
                 top_k=2,
                 all_documents=all_documents,
             )
             retrieval._retriever(
                 flask_app=flask_app,  # type: ignore[arg-type]
-                session=session,
-                dataset_id="hq-ds",
+                session=retrieval_session,
+                dataset_id=high_dataset_id,
                 query="python",
                 top_k=2,
                 all_documents=all_documents,
@@ -5304,20 +5514,30 @@ class TestInternalHooksCoverage:
         assert mock_retrieve.call_count == 2
         assert len(all_documents) >= 3
 
-    def test_to_dataset_retriever_tool_paths(self, retrieval: DatasetRetrieval) -> None:
-        dataset_skip_zero = SimpleNamespace(id="d1", provider="dify", available_document_count=0)
-        dataset_ok_single = SimpleNamespace(
-            id="d2",
-            provider="dify",
-            available_document_count=2,
-            retrieval_model={"top_k": 2, "score_threshold_enabled": True, "score_threshold": 0.1},
+    def test_to_dataset_retriever_tool_paths(
+        self,
+        retrieval: DatasetRetrieval,
+        retrieval_session: Session,
+    ) -> None:
+        tenant_id = str(uuid4())
+        missing_dataset_id = str(uuid4())
+        available_dataset_id = str(uuid4())
+        dataset_ok_single = _persist_dataset(
+            retrieval_session,
+            dataset_id=available_dataset_id,
+            tenant_id=tenant_id,
+            provider="external",
         )
+        dataset_ok_single.retrieval_model = {
+            "top_k": 2,
+            "score_threshold_enabled": True,
+            "score_threshold": 0.1,
+        }
+        retrieval_session.commit()
         single_config = DatasetRetrieveConfigEntity(
             retrieve_strategy=DatasetRetrieveConfigEntity.RetrieveStrategy.SINGLE,
             metadata_filtering_mode="disabled",
         )
-        session = MagicMock()
-        session.scalar.side_effect = [None, dataset_skip_zero, dataset_ok_single]
         with (
             patch(
                 "core.tools.utils.dataset_retriever.dataset_retriever_tool.DatasetRetrieverTool.from_dataset",
@@ -5325,9 +5545,9 @@ class TestInternalHooksCoverage:
             ) as mock_single_tool,
         ):
             single_tools = retrieval.to_dataset_retriever_tool(
-                session=session,
-                tenant_id="tenant-1",
-                dataset_ids=["missing", "d1", "d2"],
+                session=retrieval_session,
+                tenant_id=tenant_id,
+                dataset_ids=[missing_dataset_id, available_dataset_id],
                 retrieve_config=single_config,
                 return_resource=True,
                 invoke_from=InvokeFrom.WEB_APP,
@@ -5344,13 +5564,11 @@ class TestInternalHooksCoverage:
             metadata_filtering_mode="disabled",
             reranking_model=None,
         )
-        session = MagicMock()
-        session.scalar.return_value = dataset_ok_single
         with pytest.raises(ValueError, match="Reranking model is required"):
             retrieval.to_dataset_retriever_tool(
-                session=session,
-                tenant_id="tenant-1",
-                dataset_ids=["d2"],
+                session=retrieval_session,
+                tenant_id=tenant_id,
+                dataset_ids=[available_dataset_id],
                 retrieve_config=multiple_config_missing,
                 return_resource=True,
                 invoke_from=InvokeFrom.WEB_APP,
@@ -5366,8 +5584,6 @@ class TestInternalHooksCoverage:
             score_threshold=0.2,
             reranking_model={"reranking_provider_name": "cohere", "reranking_model_name": "rerank-v3"},
         )
-        session = MagicMock()
-        session.scalar.return_value = dataset_ok_single
         with (
             patch(
                 "core.tools.utils.dataset_retriever.dataset_multi_retriever_tool.DatasetMultiRetrieverTool.from_dataset",
@@ -5375,9 +5591,9 @@ class TestInternalHooksCoverage:
             ) as mock_multi_tool,
         ):
             multi_tools = retrieval.to_dataset_retriever_tool(
-                session=session,
-                tenant_id="tenant-1",
-                dataset_ids=["d2"],
+                session=retrieval_session,
+                tenant_id=tenant_id,
+                dataset_ids=[available_dataset_id],
                 retrieve_config=multiple_config,
                 return_resource=False,
                 invoke_from=InvokeFrom.DEBUGGER,
@@ -5388,7 +5604,7 @@ class TestInternalHooksCoverage:
         assert multi_tools == ["multi-tool"]
         mock_multi_tool.assert_called_once()
 
-    def test_additional_small_branches(self, retrieval: DatasetRetrieval) -> None:
+    def test_additional_small_branches(self, retrieval: DatasetRetrieval, retrieval_session: Session) -> None:
         keyword_handler = Mock()
         keyword_handler.extract_keywords.side_effect = [[], []]
         doc = Document(page_content="doc", metadata={"doc_id": "1"}, provider="dify")
@@ -5397,22 +5613,28 @@ class TestInternalHooksCoverage:
         assert len(ranked) == 1
         assert ranked[0].metadata.get("score") == 0.0
 
-        with patch("core.rag.retrieval.dataset_retrieval.db.session.scalars") as mock_scalars:
-            mock_scalars.return_value.all.return_value = []
-            with pytest.raises(ValueError):
-                retrieval._automatic_metadata_filter_func(
-                    MagicMock(),
-                    dataset_ids=["d1"],
-                    query="python",
-                    tenant_id="tenant-1",
-                    user_id="user-1",
-                    metadata_model_config=None,  # type: ignore[arg-type]
-                )
+        dataset_id = str(uuid4())
+        with pytest.raises(ValueError):
+            retrieval._automatic_metadata_filter_func(
+                retrieval_session,
+                dataset_ids=[dataset_id],
+                query="python",
+                tenant_id="tenant-1",
+                user_id="user-1",
+                metadata_model_config=None,  # type: ignore[arg-type]
+            )
 
-        session_scalars = Mock()
-        session_scalars.all.return_value = [SimpleNamespace(name="author")]
+        retrieval_session.add(
+            DatasetMetadata(
+                tenant_id=str(uuid4()),
+                dataset_id=dataset_id,
+                type="string",
+                name="author",
+                created_by=str(uuid4()),
+            )
+        )
+        retrieval_session.commit()
         with (
-            patch("core.rag.retrieval.dataset_retrieval.db.session.scalars", return_value=session_scalars),
             patch.object(retrieval, "_fetch_model_config", return_value=(Mock(), Mock())),
             patch.object(retrieval, "_get_prompt_template", return_value=(["prompt"], [])),
             patch.object(retrieval, "_record_usage"),
@@ -5422,8 +5644,8 @@ class TestInternalHooksCoverage:
             with patch.object(retrieval, "_fetch_model_config", return_value=(model_instance, Mock())):
                 assert (
                     retrieval._automatic_metadata_filter_func(
-                        MagicMock(),
-                        dataset_ids=["d1"],
+                        retrieval_session,
+                        dataset_ids=[dataset_id],
                         query="python",
                         tenant_id="tenant-1",
                         user_id="user-1",
