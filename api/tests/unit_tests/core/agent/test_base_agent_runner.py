@@ -1,32 +1,141 @@
 import json
+from collections.abc import Iterator
+from dataclasses import dataclass
 from decimal import Decimal
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 from pytest_mock import MockerFixture
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 
 import core.agent.base_agent_runner as module
 from core.agent.base_agent_runner import BaseAgentRunner
+from graphon.file import FileTransferMethod, FileType
+from models.base import TypeBase
+from models.enums import ConversationFromSource, CreatorUserRole, MessageFileBelongsTo
+from models.model import Message, MessageAgentThought, MessageFile
 
 # ==========================================================
 # Fixtures
 # ==========================================================
 
 
-@pytest.fixture
-def mock_db_session(mocker: MockerFixture):
-    session = mocker.MagicMock()
-    mocker.patch.object(module.db, "session", session)
-    return session
+@dataclass(frozen=True)
+class _DatabaseBinding:
+    session: Session
 
 
 @pytest.fixture
-def runner(mocker: MockerFixture, mock_db_session):
+def agent_session(sqlite_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[Session]:
+    """Bind the runner to a real SQLite session with only its three message tables."""
+
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[Message.__table__, MessageAgentThought.__table__, MessageFile.__table__],
+    )
+    maker = sessionmaker(bind=sqlite_engine, expire_on_commit=False)
+    with maker() as session:
+        monkeypatch.setattr(module, "db", _DatabaseBinding(session=session))
+        yield session
+
+
+def _thought(
+    *,
+    thought_id: str | None = None,
+    message_id: str,
+    tool: str | None = "tool1;tool2",
+    labels: dict[str, object] | None = None,
+) -> MessageAgentThought:
+    thought = MessageAgentThought(
+        message_id=message_id,
+        position=1,
+        created_by_role=CreatorUserRole.ACCOUNT,
+        created_by=str(uuid4()),
+        thought="",
+        tool=tool,
+        tool_labels_str=json.dumps(labels or {}),
+    )
+    if thought_id is not None:
+        thought.id = thought_id
+    return thought
+
+
+def _persist_thought(
+    session: Session,
+    *,
+    thought_id: str | None = None,
+    message_id: str,
+    tool: str | None = "tool1;tool2",
+    labels: dict[str, object] | None = None,
+) -> MessageAgentThought:
+    thought = _thought(
+        thought_id=thought_id,
+        message_id=message_id,
+        tool=tool,
+        labels=labels,
+    )
+    session.add(thought)
+    session.commit()
+    return thought
+
+
+def _persist_message(session: Session, *, message_id: str, conversation_id: str, answer: str = "") -> Message:
+    message = Message(
+        id=message_id,
+        app_id=str(uuid4()),
+        conversation_id=conversation_id,
+        query="hello",
+        message={},
+        message_unit_price=Decimal(0),
+        answer=answer,
+        answer_unit_price=Decimal(0),
+        currency="USD",
+        from_source=ConversationFromSource.CONSOLE,
+    )
+    message._inputs = {}
+    session.add(message)
+    session.commit()
+    return message
+
+
+def _persist_message_file(session: Session, *, message_id: str) -> MessageFile:
+    message_file = MessageFile(
+        message_id=message_id,
+        type=FileType.IMAGE,
+        transfer_method=FileTransferMethod.REMOTE_URL,
+        created_by_role=CreatorUserRole.ACCOUNT,
+        created_by=str(uuid4()),
+        belongs_to=MessageFileBelongsTo.USER,
+        url="https://example.test/image.png",
+    )
+    session.add(message_file)
+    session.commit()
+    return message_file
+
+
+def _prepare_history(
+    session: Session,
+    runner: BaseAgentRunner,
+    mocker: MockerFixture,
+    returned_messages: list[object],
+) -> None:
+    _persist_message(
+        session,
+        message_id=str(uuid4()),
+        conversation_id=runner.message.conversation_id,
+    )
+    mocker.patch.object(module, "extract_thread_messages", return_value=returned_messages)
+
+
+@pytest.fixture
+def runner(mocker: MockerFixture, agent_session: Session):
     r = BaseAgentRunner.__new__(BaseAgentRunner)
-    r.tenant_id = "tenant"
-    r.user_id = "user"
+    r.tenant_id = str(uuid4())
+    r.user_id = str(uuid4())
     r.agent_thought_count = 0
-    r.message = mocker.MagicMock(id="msg_current", conversation_id="conv1")
+    r.message = mocker.MagicMock(id=str(uuid4()), conversation_id=str(uuid4()))
     r.app_config = mocker.MagicMock()
     r.app_config.app_id = "app1"
     r.app_config.agent = None
@@ -83,20 +192,22 @@ class TestUpdatePromptTool:
 
 
 class TestCreateAgentThought:
-    def test_with_files(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        mock_thought = mocker.MagicMock(id=10)
-        mocker.patch.object(module, "MessageAgentThought", return_value=mock_thought)
+    def test_with_files(self, runner: BaseAgentRunner, agent_session: Session):
+        message_id = str(uuid4())
 
-        result = runner.create_agent_thought("m", "msg", "tool", "input", ["f1"])
-        assert result == "10"
+        result = runner.create_agent_thought(message_id, "msg", "tool", "input", ["f1"])
+
+        thought = agent_session.get_one(MessageAgentThought, result)
+        assert thought.message_id == message_id
+        assert thought.message_files == json.dumps(["f1"])
         assert runner.agent_thought_count == 1
 
-    def test_without_files(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        mock_thought = mocker.MagicMock(id=11)
-        mocker.patch.object(module, "MessageAgentThought", return_value=mock_thought)
+    def test_without_files(self, runner: BaseAgentRunner, agent_session: Session):
+        message_id = str(uuid4())
 
-        result = runner.create_agent_thought("m", "msg", "tool", "input", [])
-        assert result == "11"
+        result = runner.create_agent_thought(message_id, "msg", "tool", "input", [])
+
+        assert agent_session.get_one(MessageAgentThought, result).message_files == ""
 
 
 # ==========================================================
@@ -105,21 +216,12 @@ class TestCreateAgentThought:
 
 
 class TestSaveAgentThought:
-    def setup_agent(self, mocker: MockerFixture):
-        agent = mocker.MagicMock()
-        agent.tool = "tool1;tool2"
-        agent.tool_labels = {}
-        agent.thought = ""
-        return agent
-
-    def test_not_found(self, runner: BaseAgentRunner, mock_db_session):
-        mock_db_session.scalar.return_value = None
+    def test_not_found(self, runner: BaseAgentRunner, agent_session: Session):
         with pytest.raises(ValueError):
-            runner.save_agent_thought("id", None, None, None, None, None, None, [], None)
+            runner.save_agent_thought(str(uuid4()), None, None, None, None, None, None, [], None)
 
-    def test_full_update(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        agent = self.setup_agent(mocker)
-        mock_db_session.scalar.return_value = agent
+    def test_full_update(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
+        agent = _persist_thought(agent_session, message_id=str(uuid4()))
 
         mock_label = mocker.MagicMock()
         mock_label.to_dict.return_value = {"en_US": "label"}
@@ -137,7 +239,7 @@ class TestSaveAgentThought:
         )
 
         runner.save_agent_thought(
-            "id",
+            agent.id,
             "tool1;tool2",
             {"a": 1},
             "thought",
@@ -148,53 +250,31 @@ class TestSaveAgentThought:
             usage,
         )
 
-        assert agent.answer == "answer"
-        assert agent.tokens == 3
-        assert "tool1" in json.loads(agent.tool_labels_str)
+        persisted = agent_session.get_one(MessageAgentThought, agent.id)
+        assert persisted.answer == "answer"
+        assert persisted.tokens == 3
+        assert "tool1" in json.loads(persisted.tool_labels_str)
 
-    def test_label_fallback_when_none(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        agent = self.setup_agent(mocker)
-        agent.tool = "unknown_tool"
-        mock_db_session.scalar.return_value = agent
+    def test_label_fallback_when_none(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
+        agent = _persist_thought(agent_session, message_id=str(uuid4()), tool="unknown_tool")
         mocker.patch.object(module.ToolManager, "get_tool_label", return_value=None)
 
-        runner.save_agent_thought("id", None, None, None, None, None, None, [], None)
-        labels = json.loads(agent.tool_labels_str)
+        runner.save_agent_thought(agent.id, None, None, None, None, None, None, [], None)
+        labels = json.loads(agent_session.get_one(MessageAgentThought, agent.id).tool_labels_str)
         assert "unknown_tool" in labels
 
-    def test_json_failure_paths(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        agent = self.setup_agent(mocker)
-        mock_db_session.scalar.return_value = agent
+    def test_messages_ids_none(self, runner: BaseAgentRunner, agent_session: Session):
+        agent = _persist_thought(agent_session, message_id=str(uuid4()))
 
-        bad_obj = MagicMock()
-        bad_obj.__str__.return_value = "bad"
+        runner.save_agent_thought(agent.id, None, None, None, None, None, None, None, None)
 
-        runner.save_agent_thought(
-            "id",
-            None,
-            bad_obj,
-            None,
-            bad_obj,
-            bad_obj,
-            None,
-            [],
-            None,
-        )
+        assert agent_session.get_one(MessageAgentThought, agent.id).message_files is None
 
-        assert mock_db_session.commit.called
-
-    def test_messages_ids_none(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        agent = self.setup_agent(mocker)
-        mock_db_session.scalar.return_value = agent
-        runner.save_agent_thought("id", None, None, None, None, None, None, None, None)
-        assert mock_db_session.commit.called
-
-    def test_success_dict_serialization(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        agent = self.setup_agent(mocker)
-        mock_db_session.scalar.return_value = agent
+    def test_success_dict_serialization(self, runner: BaseAgentRunner, agent_session: Session):
+        agent = _persist_thought(agent_session, message_id=str(uuid4()))
 
         runner.save_agent_thought(
-            "id",
+            agent.id,
             None,
             {"a": 1},
             None,
@@ -205,8 +285,9 @@ class TestSaveAgentThought:
             None,
         )
 
-        assert isinstance(agent.tool_input, str)
-        assert isinstance(agent.observation, str)
+        persisted = agent_session.get_one(MessageAgentThought, agent.id)
+        assert isinstance(persisted.tool_input, str)
+        assert isinstance(persisted.observation, str)
 
 
 # ==========================================================
@@ -215,26 +296,27 @@ class TestSaveAgentThought:
 
 
 class TestOrganizeUserPrompt:
-    def test_no_files(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        mock_db_session.scalars.return_value.all.return_value = []
+    def test_no_files(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
         msg = mocker.MagicMock(id="1", query="hello", app_model_config=None)
         result = runner.organize_agent_user_prompt(msg)
         assert result.content == "hello"
 
-    def test_with_files_no_config(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        mock_db_session.scalars.return_value.all.return_value = [mocker.MagicMock()]
-        msg = mocker.MagicMock(id="1", query="hello", app_model_config=None)
+    def test_with_files_no_config(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
+        message_id = str(uuid4())
+        _persist_message_file(agent_session, message_id=message_id)
+        msg = mocker.MagicMock(id=message_id, query="hello", app_model_config=None)
         result = runner.organize_agent_user_prompt(msg)
         assert result.content == "hello"
 
-    def test_image_detail_low_fallback(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        mock_db_session.scalars.return_value.all.return_value = [mocker.MagicMock()]
+    def test_image_detail_low_fallback(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
+        message_id = str(uuid4())
+        _persist_message_file(agent_session, message_id=message_id)
         file_config = mocker.MagicMock()
         file_config.image_config = mocker.MagicMock(detail=None)
         mocker.patch.object(module.FileUploadConfigManager, "convert", return_value=file_config)
         mocker.patch.object(module.file_factory, "build_from_message_files", return_value=[])
 
-        msg = mocker.MagicMock(id="1", query="hello")
+        msg = mocker.MagicMock(id=message_id, query="hello")
         msg.app_model_config.to_dict.return_value = {}
 
         result = runner.organize_agent_user_prompt(msg)
@@ -247,27 +329,24 @@ class TestOrganizeUserPrompt:
 
 
 class TestOrganizeHistory:
-    def test_empty(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = []
+    def test_empty(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
         mocker.patch.object(module, "extract_thread_messages", return_value=[])
         result = runner.organize_agent_history([])
         assert result == []
 
-    def test_with_answer_only(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
+    def test_with_answer_only(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
         msg = mocker.MagicMock(id="m1", answer="ans", agent_thoughts=[], app_model_config=None)
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = [msg]
-        mocker.patch.object(module, "extract_thread_messages", return_value=[msg])
+        _prepare_history(agent_session, runner, mocker, [msg])
         result = runner.organize_agent_history([])
         assert any(isinstance(x, module.AssistantPromptMessage) for x in result)
 
-    def test_skip_current_message(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        msg = mocker.MagicMock(id="msg_current", agent_thoughts=[], answer="ans", app_model_config=None)
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = [msg]
-        mocker.patch.object(module, "extract_thread_messages", return_value=[msg])
+    def test_skip_current_message(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
+        msg = mocker.MagicMock(id=runner.message.id, agent_thoughts=[], answer="ans", app_model_config=None)
+        _prepare_history(agent_session, runner, mocker, [msg])
         result = runner.organize_agent_history([])
         assert result == []
 
-    def test_with_tool_calls_invalid_json(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
+    def test_with_tool_calls_invalid_json(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
         thought = mocker.MagicMock(
             tool="tool1",
             tool_input="invalid",
@@ -276,23 +355,21 @@ class TestOrganizeHistory:
         )
         msg = mocker.MagicMock(id="m2", agent_thoughts=[thought], answer=None, app_model_config=None)
 
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = [msg]
-        mocker.patch.object(module, "extract_thread_messages", return_value=[msg])
+        _prepare_history(agent_session, runner, mocker, [msg])
         mocker.patch("uuid.uuid4", return_value="uuid")
 
         result = runner.organize_agent_history([])
         assert isinstance(result, list)
 
-    def test_empty_tool_name_split(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
+    def test_empty_tool_name_split(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
         thought = mocker.MagicMock(tool=";", thought="thinking")
         msg = mocker.MagicMock(id="m5", agent_thoughts=[thought], answer=None, app_model_config=None)
 
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = [msg]
-        mocker.patch.object(module, "extract_thread_messages", return_value=[msg])
+        _prepare_history(agent_session, runner, mocker, [msg])
         result = runner.organize_agent_history([])
         assert isinstance(result, list)
 
-    def test_valid_json_tool_flow(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
+    def test_valid_json_tool_flow(self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture):
         thought = mocker.MagicMock(
             tool="tool1",
             tool_input=json.dumps({"tool1": {"x": 1}}),
@@ -307,8 +384,7 @@ class TestOrganizeHistory:
             app_model_config=None,
         )
 
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = [msg]
-        mocker.patch.object(module, "extract_thread_messages", return_value=[msg])
+        _prepare_history(agent_session, runner, mocker, [msg])
         mocker.patch("uuid.uuid4", return_value="uuid")
 
         result = runner.organize_agent_history([])
@@ -370,26 +446,23 @@ class TestInitPromptToolsExtended:
 
 
 class TestAdditionalCoverage:
-    def test_save_agent_thought_existing_labels(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        agent = mocker.MagicMock()
-        agent.tool = "tool1"
-        agent.tool_labels = {"tool1": {"en_US": "existing"}}
-        agent.thought = ""
-        mock_db_session.scalar.return_value = agent
+    def test_save_agent_thought_existing_labels(self, runner: BaseAgentRunner, agent_session: Session):
+        agent = _persist_thought(
+            agent_session,
+            message_id=str(uuid4()),
+            tool="tool1",
+            labels={"tool1": {"en_US": "existing"}},
+        )
 
-        runner.save_agent_thought("id", None, None, None, None, None, None, [], None)
-        labels = json.loads(agent.tool_labels_str)
+        runner.save_agent_thought(agent.id, None, None, None, None, None, None, [], None)
+        labels = json.loads(agent_session.get_one(MessageAgentThought, agent.id).tool_labels_str)
         assert labels["tool1"]["en_US"] == "existing"
 
-    def test_save_agent_thought_tool_meta_string(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
-        agent = mocker.MagicMock()
-        agent.tool = "tool1"
-        agent.tool_labels = {}
-        agent.thought = ""
-        mock_db_session.scalar.return_value = agent
+    def test_save_agent_thought_tool_meta_string(self, runner: BaseAgentRunner, agent_session: Session):
+        agent = _persist_thought(agent_session, message_id=str(uuid4()), tool="tool1")
 
-        runner.save_agent_thought("id", None, None, None, None, "meta_string", None, [], None)
-        assert agent.tool_meta_str == "meta_string"
+        runner.save_agent_thought(agent.id, None, None, None, None, "meta_string", None, [], None)
+        assert agent_session.get_one(MessageAgentThought, agent.id).tool_meta_str == "meta_string"
 
     def test_convert_dataset_retriever_tool(self, runner: BaseAgentRunner, mocker: MockerFixture):
         ds_tool = mocker.MagicMock()
@@ -409,9 +482,10 @@ class TestAdditionalCoverage:
         assert prompt is not None
 
     def test_organize_user_prompt_with_file_objects(
-        self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture
+        self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture
     ):
-        mock_db_session.scalars.return_value.all.return_value = [mocker.MagicMock()]
+        message_id = str(uuid4())
+        _persist_message_file(agent_session, message_id=message_id)
 
         file_config = mocker.MagicMock()
         file_config.image_config = mocker.MagicMock(detail=None)
@@ -423,24 +497,25 @@ class TestAdditionalCoverage:
         mocker.patch.object(module, "UserPromptMessage", side_effect=lambda **kw: MagicMock(**kw))
         mocker.patch.object(module, "TextPromptMessageContent", side_effect=lambda **kw: MagicMock(**kw))
 
-        msg = mocker.MagicMock(id="1", query="hello")
+        msg = mocker.MagicMock(id=message_id, query="hello")
         msg.app_model_config.to_dict.return_value = {}
 
         result = runner.organize_agent_user_prompt(msg)
         assert result is not None
 
-    def test_organize_history_without_tool_names(self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture):
+    def test_organize_history_without_tool_names(
+        self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture
+    ):
         thought = mocker.MagicMock(tool=None, thought="thinking")
         msg = mocker.MagicMock(id="m3", agent_thoughts=[thought], answer=None, app_model_config=None)
 
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = [msg]
-        mocker.patch.object(module, "extract_thread_messages", return_value=[msg])
+        _prepare_history(agent_session, runner, mocker, [msg])
 
         result = runner.organize_agent_history([])
         assert isinstance(result, list)
 
     def test_organize_history_multiple_tools_split(
-        self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture
+        self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture
     ):
         thought = mocker.MagicMock(
             tool="tool1;tool2",
@@ -450,8 +525,7 @@ class TestAdditionalCoverage:
         )
         msg = mocker.MagicMock(id="m4", agent_thoughts=[thought], answer=None, app_model_config=None)
 
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = [msg]
-        mocker.patch.object(module, "extract_thread_messages", return_value=[msg])
+        _prepare_history(agent_session, runner, mocker, [msg])
         mocker.patch("uuid.uuid4", return_value="uuid")
 
         result = runner.organize_agent_history([])
@@ -479,10 +553,13 @@ class TestConvertDatasetRetrieverTool:
 
 
 class TestBaseAgentRunnerInit:
-    def test_init_sets_stream_tool_call_and_files(self, mocker: MockerFixture):
-        session = mocker.MagicMock()
-        session.scalar.return_value = 2
-        mocker.patch.object(module.db, "session", session)
+    def test_init_sets_stream_tool_call_and_files(self, agent_session: Session, mocker: MockerFixture):
+        message_id = str(uuid4())
+        _persist_thought(agent_session, message_id=message_id)
+        second = _thought(message_id=message_id)
+        second.position = 2
+        agent_session.add(second)
+        agent_session.commit()
 
         mocker.patch.object(BaseAgentRunner, "organize_agent_history", return_value=[])
         mocker.patch.object(module.DatasetRetrieverTool, "get_dataset_tools", return_value=["ds_tool"])
@@ -500,10 +577,10 @@ class TestBaseAgentRunnerInit:
         app_config.additional_features = mocker.MagicMock(show_retrieve_source=True)
 
         app_generate = mocker.MagicMock(invoke_from="test", inputs={}, files=["file1"])
-        message = mocker.MagicMock(id="msg1", conversation_id="conv1")
+        message = mocker.MagicMock(id=message_id, conversation_id=str(uuid4()))
 
         runner = BaseAgentRunner(
-            session=session,
+            session=agent_session,
             tenant_id="tenant",
             application_generate_entity=app_generate,
             conversation=mocker.MagicMock(),
@@ -536,13 +613,9 @@ class TestBaseAgentRunnerCoverage:
         assert len(prompt_tools) == 1
 
     def test_save_agent_thought_json_dumps_fallbacks(
-        self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture
+        self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture
     ):
-        agent = mocker.MagicMock()
-        agent.tool = "tool1"
-        agent.tool_labels = {}
-        agent.thought = ""
-        mock_db_session.scalar.return_value = agent
+        agent = _persist_thought(agent_session, message_id=str(uuid4()), tool="tool1")
 
         mocker.patch.object(module.ToolManager, "get_tool_label", return_value=None)
 
@@ -560,7 +633,7 @@ class TestBaseAgentRunnerCoverage:
         mocker.patch.object(module.json, "dumps", side_effect=dumps_side_effect)
 
         runner.save_agent_thought(
-            "id",
+            agent.id,
             "tool1",
             tool_input,
             None,
@@ -571,30 +644,26 @@ class TestBaseAgentRunnerCoverage:
             None,
         )
 
-        assert isinstance(agent.tool_input, str)
-        assert isinstance(agent.observation, str)
-        assert isinstance(agent.tool_meta_str, str)
+        persisted = agent_session.get_one(MessageAgentThought, agent.id)
+        assert isinstance(persisted.tool_input, str)
+        assert isinstance(persisted.observation, str)
+        assert isinstance(persisted.tool_meta_str, str)
 
     def test_save_agent_thought_skips_empty_tool_name(
-        self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture
+        self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture
     ):
-        agent = mocker.MagicMock()
-        agent.tool = "tool1;;"
-        agent.tool_labels = {}
-        agent.thought = ""
-        mock_db_session.scalar.return_value = agent
+        agent = _persist_thought(agent_session, message_id=str(uuid4()), tool="tool1;;")
 
         mocker.patch.object(module.ToolManager, "get_tool_label", return_value=None)
 
-        runner.save_agent_thought("id", None, None, None, None, None, None, [], None)
+        runner.save_agent_thought(agent.id, None, None, None, None, None, None, [], None)
 
-        labels = json.loads(agent.tool_labels_str)
+        labels = json.loads(agent_session.get_one(MessageAgentThought, agent.id).tool_labels_str)
         assert "" not in labels
 
     def test_organize_history_includes_system_prompt(
-        self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture
+        self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture
     ):
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = []
         mocker.patch.object(module, "extract_thread_messages", return_value=[])
 
         system_message = module.SystemPromptMessage(content="sys")
@@ -604,7 +673,7 @@ class TestBaseAgentRunnerCoverage:
         assert system_message in result
 
     def test_organize_history_tool_inputs_and_observation_none(
-        self, runner: BaseAgentRunner, mock_db_session, mocker: MockerFixture
+        self, runner: BaseAgentRunner, agent_session: Session, mocker: MockerFixture
     ):
         thought = mocker.MagicMock(
             tool="tool1",
@@ -614,8 +683,7 @@ class TestBaseAgentRunnerCoverage:
         )
         msg = mocker.MagicMock(id="m6", agent_thoughts=[thought], answer=None, app_model_config=None)
 
-        mock_db_session.execute.return_value.scalars.return_value.all.return_value = [msg]
-        mocker.patch.object(module, "extract_thread_messages", return_value=[msg])
+        _prepare_history(agent_session, runner, mocker, [msg])
         mocker.patch("uuid.uuid4", return_value="uuid")
 
         mocker.patch.object(
