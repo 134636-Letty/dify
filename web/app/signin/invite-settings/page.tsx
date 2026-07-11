@@ -45,11 +45,26 @@ const TIMEZONE_OPTIONS: TimezoneSelectOption[] = timezones.map(item => ({
   name: item.name,
 }))
 
+const INVITATION_ACCOUNT_MISMATCH = 'invitation_account_mismatch'
+
 const getInitialLanguage = (locale: Locale): Locale => {
   if (LANGUAGE_OPTIONS.some(item => item.value === locale))
     return locale
 
   return i18n.defaultLocale
+}
+
+const getActivationErrorCode = async (error: unknown): Promise<string | undefined> => {
+  if (!(error instanceof Response))
+    return undefined
+
+  try {
+    const data = await error.json() as { code?: unknown }
+    return typeof data.code === 'string' ? data.code : undefined
+  }
+  catch {
+    return undefined
+  }
 }
 
 export default function InviteSettingsPage() {
@@ -64,6 +79,7 @@ export default function InviteSettingsPage() {
   const [isActivating, setIsActivating] = useState(false)
   const [language, setLanguage] = useState(() => getInitialLanguage(locale))
   const [timezone, setTimezone] = useState(() => getBrowserTimezone() || 'America/Los_Angeles')
+  const [activationErrorCode, setActivationErrorCode] = useState<string | null>(null)
   const selectedLanguage = LANGUAGE_OPTIONS.find(item => item.value === language)
   const selectedTimezone = TIMEZONE_OPTIONS.find(item => item.value === timezone)
 
@@ -90,6 +106,7 @@ export default function InviteSettingsPage() {
 
   const handleActivate = useCallback(async () => {
     try {
+      setActivationErrorCode(null)
       if (requiresAccountSetup && !name) {
         toast.error(t($ => $.enterYourName, { ns: 'login' }))
         return
@@ -118,7 +135,12 @@ export default function InviteSettingsPage() {
         router.replace(redirectUrl || '/')
       }
     }
-    catch {
+    catch (error) {
+      const errorCode = await getActivationErrorCode(error)
+      if (errorCode === INVITATION_ACCOUNT_MISMATCH) {
+        setActivationErrorCode(errorCode)
+        return
+      }
       recheck()
       setIsActivating(false)
     }
@@ -236,6 +258,11 @@ export default function InviteSettingsPage() {
           >
             {`${t($ => $.join, { ns: 'login' })} ${checkRes?.data?.workspace_name}`}
           </Button>
+          {activationErrorCode === INVITATION_ACCOUNT_MISMATCH && (
+            <div role="alert" className="mt-3 system-sm-regular text-text-warning-secondary">
+              {t('invitationAccountMismatch', { ns: 'login' })}
+            </div>
+          )}
         </div>
       </form>
       {!systemFeatures.branding.enabled && (
