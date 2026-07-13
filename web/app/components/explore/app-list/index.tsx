@@ -33,8 +33,9 @@ import {
   useStepByStepTourStateActions,
 } from '@/app/components/step-by-step-tour/storage'
 import { STEP_BY_STEP_TOUR_TARGETS } from '@/app/components/step-by-step-tour/target-registry'
-import { currentWorkspaceIdAtom, workspacePermissionKeysAtom } from '@/context/app-context-state'
 import { useLocale } from '@/context/i18n'
+import { workspacePermissionKeysAtom } from '@/context/permission-state'
+import { currentWorkspaceIdAtom } from '@/context/workspace-state'
 import { systemFeaturesQueryOptions } from '@/features/system-features/client'
 import { useImportDSL } from '@/hooks/use-import-dsl'
 import { DSLImportMode } from '@/models/app'
@@ -139,7 +140,7 @@ const Apps = ({ onSuccess }: { onSuccess?: () => void }) => {
       isAppListError: exploreAppListQuery.isError || (!exploreAppListQuery.isPending && !exploreAppListQuery.data),
     }),
   })
-  const allCategoriesEn = t('apps.allCategories', { ns: 'explore', lng: 'en' })
+  const allCategoriesEn = t($ => $['apps.allCategories'], { ns: 'explore', lng: 'en' })
   const canCreateApp = hasPermission(workspacePermissionKeys, 'app.create_and_management')
   // eslint-disable-next-line react/use-state -- Step-by-step tour storage hooks are not React useState calls.
   const stepByStepTourAccountState = useStepByStepTourAccountStateValue()

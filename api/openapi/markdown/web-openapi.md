@@ -1576,6 +1576,7 @@ Default configuration for form inputs.
 | enable_learn_app | boolean, <br>**Default:** true |  | Yes |
 | enable_marketplace | boolean |  | Yes |
 | enable_social_oauth_login | boolean |  | Yes |
+| enable_step_by_step_tour | boolean |  | Yes |
 | enable_trial_app | boolean |  | Yes |
 | is_allow_create_workspace | boolean |  | Yes |
 | is_allow_register | boolean |  | Yes |
@@ -1685,19 +1686,25 @@ in form definiton, or a variable while the workflow is running.
 | ---- | ---- | ----------- | -------- |
 | agent_thoughts | [ [AgentThought](#agentthought) ] |  | Yes |
 | answer | string |  | Yes |
+| answer_tokens | integer |  | No |
 | conversation_id | string |  | Yes |
 | created_at | integer |  | No |
+| currency | string |  | No |
 | error | string |  | No |
 | extra_contents | [ [HumanInputContent](#humaninputcontent) ] |  | Yes |
 | feedback | [SimpleFeedback](#simplefeedback) |  | No |
 | id | string |  | Yes |
 | inputs | object |  | Yes |
 | message_files | [ [MessageFile](#messagefile) ] |  | Yes |
+| message_tokens | integer |  | No |
 | metadata | [JSONValueType](#jsonvaluetype) |  | No |
 | parent_message_id | string |  | No |
+| provider_response_latency | number |  | No |
 | query | string |  | Yes |
 | retriever_resources | [ [RetrieverResource](#retrieverresource) ] |  | Yes |
 | status | string |  | Yes |
+| total_price | string |  | No |
+| total_tokens | integer |  | Yes |
 
 #### WebModelConfigResponse
 

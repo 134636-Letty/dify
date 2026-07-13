@@ -668,11 +668,6 @@
       "count": 2
     },
     "ts/no-explicit-any": {
-      "count": 3
-    }
-  },
-  "web/app/components/app/configuration/dataset-config/settings-modal/retrieval-section.tsx": {
-    "ts/no-explicit-any": {
       "count": 1
     }
   },
@@ -894,11 +889,6 @@
       "count": 2
     }
   },
-  "web/app/components/app/workflow-log/trigger-by-display.tsx": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
   "web/app/components/apps/app-card.tsx": {
     "jsx-a11y/click-events-have-key-events": {
       "count": 1
@@ -915,11 +905,6 @@
       "count": 1
     },
     "jsx-a11y/no-static-element-interactions": {
-      "count": 1
-    }
-  },
-  "web/app/components/apps/starred-app-card.tsx": {
-    "jsx-a11y/no-noninteractive-element-to-interactive-role": {
       "count": 1
     }
   },
@@ -964,11 +949,6 @@
   },
   "web/app/components/base/amplitude/index.ts": {
     "no-barrel-files/no-barrel-files": {
-      "count": 2
-    }
-  },
-  "web/app/components/base/amplitude/utils.ts": {
-    "ts/no-explicit-any": {
       "count": 2
     }
   },
@@ -1603,11 +1583,6 @@
       "count": 6
     }
   },
-  "web/app/components/base/icons/src/public/thought/index.ts": {
-    "no-barrel-files/no-barrel-files": {
-      "count": 1
-    }
-  },
   "web/app/components/base/icons/src/public/tracing/index.ts": {
     "no-barrel-files/no-barrel-files": {
       "count": 21
@@ -1806,7 +1781,7 @@
   },
   "web/app/components/base/image-uploader/hooks.ts": {
     "ts/no-explicit-any": {
-      "count": 4
+      "count": 2
     }
   },
   "web/app/components/base/image-uploader/image-link-input.tsx": {
@@ -1844,11 +1819,6 @@
   "web/app/components/base/inline-delete-confirm/index.stories.tsx": {
     "no-console": {
       "count": 2
-    }
-  },
-  "web/app/components/base/input-with-copy/index.tsx": {
-    "react/unsupported-syntax": {
-      "count": 1
     }
   },
   "web/app/components/base/input/index.stories.tsx": {
@@ -3090,11 +3060,6 @@
       "count": 1
     }
   },
-  "web/app/components/datasets/hit-testing/index.tsx": {
-    "react/unsupported-syntax": {
-      "count": 1
-    }
-  },
   "web/app/components/datasets/list/dataset-card/__tests__/index.spec.tsx": {
     "jsx-a11y/click-events-have-key-events": {
       "count": 1
@@ -3233,22 +3198,6 @@
       "count": 1
     }
   },
-  "web/app/components/explore/banner/banner-item.tsx": {
-    "jsx-a11y/click-events-have-key-events": {
-      "count": 1
-    },
-    "jsx-a11y/no-static-element-interactions": {
-      "count": 1
-    }
-  },
-  "web/app/components/explore/banner/indicator-button.tsx": {
-    "react-hooks-extra/no-direct-set-state-in-use-effect": {
-      "count": 1
-    },
-    "react/set-state-in-effect": {
-      "count": 2
-    }
-  },
   "web/app/components/explore/item-operation/__tests__/index.spec.tsx": {
     "jsx-a11y/click-events-have-key-events": {
       "count": 1
@@ -3302,11 +3251,6 @@
   },
   "web/app/components/goto-anything/components/__tests__/search-input.spec.tsx": {
     "jsx-a11y/no-autofocus": {
-      "count": 1
-    }
-  },
-  "web/app/components/goto-anything/components/footer.tsx": {
-    "react/unsupported-syntax": {
       "count": 1
     }
   },
@@ -3508,7 +3452,7 @@
       "count": 1
     },
     "ts/no-explicit-any": {
-      "count": 2
+      "count": 1
     }
   },
   "web/app/components/header/account-setting/model-provider-page/provider-added-card/cooldown-timer.tsx": {
@@ -4339,14 +4283,6 @@
       "count": 3
     }
   },
-  "web/app/components/tools/tool-provider-grid.tsx": {
-    "jsx-a11y/click-events-have-key-events": {
-      "count": 1
-    },
-    "jsx-a11y/no-static-element-interactions": {
-      "count": 1
-    }
-  },
   "web/app/components/tools/types.ts": {
     "erasable-syntax-only/enums": {
       "count": 4
@@ -5004,14 +4940,11 @@
   },
   "web/app/components/workflow/nodes/_base/components/variable/utils.ts": {
     "ts/no-explicit-any": {
-      "count": 32
+      "count": 31
     }
   },
   "web/app/components/workflow/nodes/_base/components/variable/var-list.tsx": {
     "no-restricted-imports": {
-      "count": 1
-    },
-    "react/unsupported-syntax": {
       "count": 1
     }
   },
@@ -5155,18 +5088,8 @@
       "count": 7
     }
   },
-  "web/app/components/workflow/nodes/answer/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
   "web/app/components/workflow/nodes/assigner/components/var-list/index.tsx": {
     "no-restricted-imports": {
-      "count": 1
-    }
-  },
-  "web/app/components/workflow/nodes/assigner/default.ts": {
-    "ts/no-explicit-any": {
       "count": 1
     }
   },
@@ -5189,11 +5112,6 @@
     }
   },
   "web/app/components/workflow/nodes/assigner/utils.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
-  "web/app/components/workflow/nodes/code/default.ts": {
     "ts/no-explicit-any": {
       "count": 1
     }
@@ -5257,19 +5175,9 @@
       "count": 1
     }
   },
-  "web/app/components/workflow/nodes/document-extractor/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
   "web/app/components/workflow/nodes/document-extractor/use-single-run-form-params.ts": {
     "ts/no-explicit-any": {
       "count": 4
-    }
-  },
-  "web/app/components/workflow/nodes/end/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
     }
   },
   "web/app/components/workflow/nodes/end/node.tsx": {
@@ -5308,11 +5216,6 @@
   },
   "web/app/components/workflow/nodes/http/components/timeout/index.tsx": {
     "no-restricted-imports": {
-      "count": 1
-    }
-  },
-  "web/app/components/workflow/nodes/http/default.ts": {
-    "ts/no-explicit-any": {
       "count": 1
     }
   },
@@ -5442,11 +5345,6 @@
       "count": 1
     }
   },
-  "web/app/components/workflow/nodes/if-else/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
   "web/app/components/workflow/nodes/if-else/types.ts": {
     "erasable-syntax-only/enums": {
       "count": 2
@@ -5460,11 +5358,6 @@
   "web/app/components/workflow/nodes/index.tsx": {
     "react/static-components": {
       "count": 4
-    }
-  },
-  "web/app/components/workflow/nodes/iteration/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
     }
   },
   "web/app/components/workflow/nodes/iteration/node.tsx": {
@@ -5595,11 +5488,6 @@
       "count": 1
     }
   },
-  "web/app/components/workflow/nodes/knowledge-retrieval/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
   "web/app/components/workflow/nodes/knowledge-retrieval/node.tsx": {
     "react/set-state-in-effect": {
       "count": 2
@@ -5623,20 +5511,12 @@
       "count": 1
     }
   },
-  "web/app/components/workflow/nodes/list-operator/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
   "web/app/components/workflow/nodes/list-operator/types.ts": {
     "erasable-syntax-only/enums": {
       "count": 1
     }
   },
   "web/app/components/workflow/nodes/llm/components/config-prompt.tsx": {
-    "react/unsupported-syntax": {
-      "count": 1
-    },
     "ts/no-explicit-any": {
       "count": 1
     }
@@ -5674,11 +5554,6 @@
   "web/app/components/workflow/nodes/llm/components/structure-output.tsx": {
     "ts/no-explicit-any": {
       "count": 2
-    }
-  },
-  "web/app/components/workflow/nodes/llm/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
     }
   },
   "web/app/components/workflow/nodes/llm/types.ts": {
@@ -5747,11 +5622,6 @@
       "count": 4
     }
   },
-  "web/app/components/workflow/nodes/loop/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
   "web/app/components/workflow/nodes/loop/panel.tsx": {
     "jsx-a11y/click-events-have-key-events": {
       "count": 1
@@ -5804,11 +5674,6 @@
       "count": 1
     }
   },
-  "web/app/components/workflow/nodes/parameter-extractor/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
-    }
-  },
   "web/app/components/workflow/nodes/parameter-extractor/types.ts": {
     "erasable-syntax-only/enums": {
       "count": 2
@@ -5850,11 +5715,6 @@
   "web/app/components/workflow/nodes/start/use-single-run-form-params.ts": {
     "ts/no-explicit-any": {
       "count": 3
-    }
-  },
-  "web/app/components/workflow/nodes/template-transform/default.ts": {
-    "ts/no-explicit-any": {
-      "count": 1
     }
   },
   "web/app/components/workflow/nodes/template-transform/use-config.ts": {
@@ -5911,7 +5771,7 @@
   },
   "web/app/components/workflow/nodes/tool/default.ts": {
     "ts/no-explicit-any": {
-      "count": 7
+      "count": 6
     }
   },
   "web/app/components/workflow/nodes/tool/hooks/use-config.ts": {
@@ -5954,13 +5814,10 @@
   },
   "web/app/components/workflow/nodes/trigger-plugin/default.ts": {
     "ts/no-explicit-any": {
-      "count": 11
+      "count": 10
     }
   },
   "web/app/components/workflow/nodes/trigger-plugin/node.tsx": {
-    "react/unsupported-syntax": {
-      "count": 1
-    },
     "ts/no-explicit-any": {
       "count": 2
     }
@@ -5985,7 +5842,7 @@
       "count": 2
     },
     "ts/no-explicit-any": {
-      "count": 10
+      "count": 4
     }
   },
   "web/app/components/workflow/nodes/trigger-schedule/panel.tsx": {
@@ -6000,11 +5857,6 @@
   },
   "web/app/components/workflow/nodes/trigger-webhook/components/parameter-table.tsx": {
     "ts/no-non-null-asserted-optional-chain": {
-      "count": 1
-    }
-  },
-  "web/app/components/workflow/nodes/trigger-webhook/default.ts": {
-    "ts/no-explicit-any": {
       "count": 1
     }
   },
@@ -6029,7 +5881,7 @@
   },
   "web/app/components/workflow/nodes/variable-assigner/default.ts": {
     "ts/no-explicit-any": {
-      "count": 2
+      "count": 1
     }
   },
   "web/app/components/workflow/nodes/variable-assigner/use-single-run-form-params.ts": {
@@ -6488,17 +6340,9 @@
       "count": 11
     }
   },
-  "web/app/components/workflow/run/utils/format-log/index.ts": {
-    "ts/no-explicit-any": {
-      "count": 2
-    }
-  },
   "web/app/components/workflow/run/utils/format-log/parallel/index.ts": {
     "no-console": {
       "count": 4
-    },
-    "ts/no-explicit-any": {
-      "count": 2
     }
   },
   "web/app/components/workflow/store/index.ts": {

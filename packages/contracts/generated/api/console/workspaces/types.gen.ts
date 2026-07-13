@@ -541,6 +541,7 @@ export type ResourceUserAccessPoliciesResponse = {
 
 export type ReplaceUserAccessPolicies = {
   access_policy_ids?: Array<string>
+  account_ids?: Array<string>
 }
 
 export type ReplaceUserAccessPoliciesResponse = {

@@ -113,7 +113,7 @@ const QuotaPanel: FC<QuotaPanelProps> = ({
     }
   }, [providers, isShowInstallModal, hideInstallFromMarketplace])
 
-  const tipText = t('modelProvider.card.tip', {
+  const tipText = t($ => $['modelProvider.card.tip'], {
     ns: 'common',
     modelNames: trialModels.map(key => modelNameMap[key as keyof typeof modelNameMap]).filter(Boolean).join(', '),
   })
@@ -139,18 +139,30 @@ const QuotaPanel: FC<QuotaPanelProps> = ({
       <div className={cn('pointer-events-none absolute inset-0', styles.gridBg)} />
       <div className="relative">
         <div className="mb-0.5 flex h-4 items-center system-xs-medium-uppercase text-text-tertiary">
-          {t('modelProvider.quotaLabel', { ns: 'common' })}
+          {t($ => $['modelProvider.quotaLabel'], { ns: 'common' })}
           <QuotaInfotip tipText={tipText} />
         </div>
-        <div className="flex h-6 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <div className="flex shrink-0 items-baseline gap-1">
-              <span className={cn('system-xl-semibold', creditUsageTextClassName)}>
-                {formatNumber(usedCredits)}
-              </span>
-              <span className="text-base leading-6 font-normal text-text-tertiary">/</span>
-              <span className={cn('system-xl-semibold', creditUsageTextClassName)}>{formatNumber(totalCredits)}</span>
-              <span className={cn('system-md-medium', creditUsageTextClassName)}>{t('modelProvider.used', { ns: 'common' })}</span>
+        <div className="flex h-6 items-center justify-between">
+          <div className="flex items-center gap-1">
+            {credits > 0
+              ? <span className="mr-0.5 system-xl-semibold text-text-secondary">{formatNumber(credits)}</span>
+              : <span className="mr-0.5 system-xl-semibold text-text-destructive">{t($ => $['modelProvider.card.quotaExhausted'], { ns: 'common' })}</span>}
+            <div className="flex h-[18px] items-start gap-1 pt-0.5 system-xs-regular text-text-tertiary">
+              <span>{t($ => $['modelProvider.credits'], { ns: 'common' })}</span>
+              {nextCreditResetDate
+                ? (
+                    <>
+                      <span className="text-text-quaternary">·</span>
+                      <span>
+                        {t($ => $['modelProvider.resetDate'], {
+                          ns: 'common',
+                          date: formatTime(nextCreditResetDate, 'YYYY-MM-DD'),
+                          interpolation: { escapeValue: false },
+                        })}
+                      </span>
+                    </>
+                  )
+                : null}
             </div>
             {isExhausted && exhaustedAt
               ? (
@@ -192,7 +204,7 @@ const QuotaPanel: FC<QuotaPanelProps> = ({
                   return 'modelProvider.card.modelAPI'
                 return 'modelProvider.card.modelSupported'
               }
-              const tooltipText = t(getTooltipKey(), { modelName: modelNameMap[key], ns: 'common' })
+              const tooltipText = t($ => $[getTooltipKey()], { modelName: modelNameMap[key], ns: 'common' })
               return (
                 <Tooltip key={key}>
                   <TooltipTrigger

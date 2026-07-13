@@ -7756,6 +7756,30 @@ Initiate OAuth login process
 | ---- | ----------- | ------ |
 | 200 | Success | **application/json**: [OAuthProviderTokenResponse](#oauthprovidertokenresponse)<br> |
 
+### [GET] /onboarding/step-by-step-tour/state
+Get account-level Step-by-step Tour state
+
+#### Responses
+
+| Code | Description | Schema |
+| ---- | ----------- | ------ |
+| 200 | Success | **application/json**: [StepByStepTourStateResponse](#stepbysteptourstateresponse)<br> |
+
+### [PATCH] /onboarding/step-by-step-tour/state
+Update account-level Step-by-step Tour state
+
+#### Request Body
+
+| Required | Schema |
+| -------- | ------ |
+|  Yes | **application/json**: [StepByStepTourStatePatchPayload](#stepbysteptourstatepatchpayload)<br> |
+
+#### Responses
+
+| Code | Description | Schema |
+| ---- | ----------- | ------ |
+| 200 | Success | **application/json**: [StepByStepTourStateResponse](#stepbysteptourstateresponse)<br> |
+
 ### [DELETE] /rag/pipeline/customized/templates/{template_id}
 #### Parameters
 
@@ -17614,19 +17638,25 @@ Built-in tool icons are URL strings; API-based tool icons are provider-defined p
 | ---- | ---- | ----------- | -------- |
 | agent_thoughts | [ [AgentThought](#agentthought) ] |  | Yes |
 | answer | string |  | Yes |
+| answer_tokens | integer |  | No |
 | conversation_id | string |  | Yes |
 | created_at | integer |  | No |
+| currency | string |  | No |
 | error | string |  | No |
 | extra_contents | [ [HumanInputContent](#humaninputcontent) ] |  | Yes |
 | feedback | [SimpleFeedback](#simplefeedback) |  | No |
 | id | string |  | Yes |
 | inputs | object |  | Yes |
 | message_files | [ [MessageFile](#messagefile) ] |  | Yes |
+| message_tokens | integer |  | No |
 | metadata | [JSONValueType](#jsonvaluetype) |  | No |
 | parent_message_id | string |  | No |
+| provider_response_latency | number |  | No |
 | query | string |  | Yes |
 | retriever_resources | [ [RetrieverResource](#retrieverresource) ] |  | Yes |
 | status | string |  | Yes |
+| total_price | string |  | No |
+| total_tokens | integer |  | Yes |
 
 #### ExternalApiTemplateListQuery
 
@@ -20716,6 +20746,7 @@ Whitelist scopes accepted by RBAC app and dataset access config APIs.
 | Name | Type | Description | Required |
 | ---- | ---- | ----------- | -------- |
 | access_policy_ids | [ string ] |  | No |
+| account_ids | [ string ] |  | No |
 
 #### ReplaceUserAccessPoliciesResponse
 
@@ -21471,6 +21502,24 @@ Query parameters for listing snippet published workflows.
 | paused | integer |  | Yes |
 | success | integer |  | Yes |
 
+#### StepByStepTourStatePatchPayload
+
+| Name | Type | Description | Required |
+| ---- | ---- | ----------- | -------- |
+| action | string, <br>**Available values:** "complete_task", "disable_current_workspace", "enable_current_workspace", "skip", "uncomplete_task" | State update action<br>*Enum:* `"complete_task"`, `"disable_current_workspace"`, `"enable_current_workspace"`, `"skip"`, `"uncomplete_task"` | Yes |
+| task_id | string | Task ID for task actions | No |
+
+#### StepByStepTourStateResponse
+
+| Name | Type | Description | Required |
+| ---- | ---- | ----------- | -------- |
+| completed_task_ids | [ string, <br>**Available values:** "home", "integration", "knowledge", "studio" ] |  | No |
+| first_workspace_id | string |  | No |
+| manually_disabled_workspace_ids | [ string ] |  | No |
+| manually_enabled_workspace_ids | [ string ] |  | No |
+| skipped | boolean |  | No |
+| updated_at | string |  | No |
+
 #### Storage
 
 | Name | Type | Description | Required |
@@ -21623,6 +21672,7 @@ Model class for provider system configuration response.
 | enable_learn_app | boolean, <br>**Default:** true |  | Yes |
 | enable_marketplace | boolean |  | Yes |
 | enable_social_oauth_login | boolean |  | Yes |
+| enable_step_by_step_tour | boolean |  | Yes |
 | enable_trial_app | boolean |  | Yes |
 | is_allow_create_workspace | boolean |  | Yes |
 | is_allow_register | boolean |  | Yes |
