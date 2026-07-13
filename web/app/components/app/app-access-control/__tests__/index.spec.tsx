@@ -12,11 +12,13 @@ let mockWebappAuth = {
   allow_sso: true,
   allow_email_password_login: false,
   allow_email_code_login: false,
+  allow_public_access: true,
 }
 
-const render = (ui: ReactElement) => renderWithSystemFeatures(ui, {
-  systemFeatures: { webapp_auth: mockWebappAuth },
-})
+const render = (ui: ReactElement) =>
+  renderWithSystemFeatures(ui, {
+    systemFeatures: { webapp_auth: mockWebappAuth },
+  })
 
 const mockMutateAsync = vi.fn()
 const mockUseUpdateAccessMode = vi.fn(() => ({
@@ -28,7 +30,8 @@ const mockUseSearchForWhiteListCandidates = vi.fn()
 
 vi.mock('@/service/access-control', () => ({
   useAppWhiteListSubjects: (...args: unknown[]) => mockUseAppWhiteListSubjects(...args),
-  useSearchForWhiteListCandidates: (...args: unknown[]) => mockUseSearchForWhiteListCandidates(...args),
+  useSearchForWhiteListCandidates: (...args: unknown[]) =>
+    mockUseSearchForWhiteListCandidates(...args),
   useUpdateAccessMode: () => mockUseUpdateAccessMode(),
 }))
 
@@ -40,6 +43,7 @@ describe('AccessControl', () => {
       allow_sso: true,
       allow_email_password_login: false,
       allow_email_code_login: false,
+      allow_public_access: true,
     }
     useAccessControlStore.setState({
       appId: '',
@@ -73,13 +77,7 @@ describe('AccessControl', () => {
       access_mode: AccessMode.PUBLIC,
     } as App
 
-    render(
-      <AccessControl
-        app={app}
-        onClose={onClose}
-        onConfirm={onConfirm}
-      />,
-    )
+    render(<AccessControl app={app} onClose={onClose} onConfirm={onConfirm} />)
 
     await waitFor(() => {
       expect(useAccessControlStore.getState().appId).toBe(app.id)
@@ -104,6 +102,7 @@ describe('AccessControl', () => {
       allow_sso: false,
       allow_email_password_login: false,
       allow_email_code_login: false,
+      allow_public_access: true,
     }
 
     render(
@@ -115,5 +114,41 @@ describe('AccessControl', () => {
 
     expect(screen.getByText('app.accessControlDialog.accessItems.external')).toBeInTheDocument()
     expect(screen.getByText('app.accessControlDialog.accessItems.anyone')).toBeInTheDocument()
+  })
+
+  describe('public access control', () => {
+    it('should render the public option enabled without a tooltip when public access is allowed', () => {
+      render(
+        <AccessControl
+          app={{ id: 'app-id-3', access_mode: AccessMode.SPECIFIC_GROUPS_MEMBERS } as App}
+          onClose={vi.fn()}
+        />,
+      )
+
+      const publicOption = screen.getByText('app.accessControlDialog.accessItems.anyone').closest('div[aria-disabled]')
+      expect(publicOption).toHaveAttribute('aria-disabled', 'false')
+      expect(screen.queryByLabelText('app.accessControlDialog.webAppPublicAccessDisabledTip')).not.toBeInTheDocument()
+    })
+
+    it('should render the public option disabled with a tooltip when public access is disabled', () => {
+      mockWebappAuth = {
+        enabled: true,
+        allow_sso: true,
+        allow_email_password_login: false,
+        allow_email_code_login: false,
+        allow_public_access: false,
+      }
+
+      render(
+        <AccessControl
+          app={{ id: 'app-id-4', access_mode: AccessMode.SPECIFIC_GROUPS_MEMBERS } as App}
+          onClose={vi.fn()}
+        />,
+      )
+
+      const publicOption = screen.getByText('app.accessControlDialog.accessItems.anyone').closest('div[aria-disabled]')
+      expect(publicOption).toHaveAttribute('aria-disabled', 'true')
+      expect(screen.getByLabelText('app.accessControlDialog.webAppPublicAccessDisabledTip')).toBeInTheDocument()
+    })
   })
 })
