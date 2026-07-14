@@ -38,6 +38,7 @@ from . import (
     feature,
     human_input_form,
     init_validate,
+    ldap,
     notification,
     ping,
     setup,

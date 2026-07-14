@@ -14,6 +14,7 @@ export const ACCOUNT_SETTING_TAB = {
   CUSTOM: 'custom',
   PREFERENCES: 'preferences',
   LANGUAGE: 'language',
+  LDAP: 'ldap',
 } as const
 
 export type AccountSettingTab = (typeof ACCOUNT_SETTING_TAB)[keyof typeof ACCOUNT_SETTING_TAB]
@@ -26,6 +27,7 @@ const WORKSPACE_SETTING_TAB_VALUES = [
   ACCOUNT_SETTING_TAB.PERMISSION_SET,
   ACCOUNT_SETTING_TAB.BILLING,
   ACCOUNT_SETTING_TAB.CUSTOM,
+  ACCOUNT_SETTING_TAB.LDAP,
 ] as const
 
 export type WorkspaceSettingTab = (typeof WORKSPACE_SETTING_TAB_VALUES)[number]
