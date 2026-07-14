@@ -163,18 +163,29 @@ export type WorkflowDraftVariableListWithoutValueResponse = {
   total: number | null
 }
 
-export type WorkflowDraftVariableResponse = {
-  description: string
-  edited: boolean
-  full_content: WorkflowDraftVariableFullContentResponse | null
-  id: string
-  is_truncated: boolean
-  name: string
-  selector: Array<string>
-  type: string
-  value: unknown
-  value_type: string
-  visible: boolean
+export type WorkflowDraftVariable = {
+  description?: string
+  edited?: boolean
+  full_content?: {
+    [key: string]: unknown
+  }
+  id?: string
+  is_truncated?: boolean
+  name?: string
+  selector?: Array<string>
+  type?: string
+  value?:
+    | string
+    | number
+    | number
+    | boolean
+    | {
+        [key: string]: unknown
+      }
+    | Array<unknown>
+    | null
+  value_type?: string
+  visible?: boolean
 }
 
 export type WorkflowDraftVariableUpdatePayload = {
@@ -270,23 +281,27 @@ export type WorkflowDraftEnvironmentVariableResponse = {
   visible: boolean
 }
 
-export type WorkflowDraftVariableWithoutValueResponse = {
-  description: string
-  edited: boolean
-  id: string
-  is_truncated: boolean
-  name: string
-  selector: Array<string>
-  type: string
-  value_type: string
-  visible: boolean
-}
+export type JsonValue =
+  | string
+  | number
+  | number
+  | boolean
+  | {
+      [key: string]: unknown
+    }
+  | Array<unknown>
+  | null
 
-export type WorkflowDraftVariableFullContentResponse = {
-  download_url: string
-  length: number | null
-  size_bytes: number | null
-  value_type: string
+export type WorkflowDraftVariableWithoutValue = {
+  description?: string
+  edited?: boolean
+  id?: string
+  is_truncated?: boolean
+  name?: string
+  selector?: Array<string>
+  type?: string
+  value_type?: string
+  visible?: boolean
 }
 
 export type GetSnippetsBySnippetIdWorkflowRunsData = {
@@ -305,8 +320,8 @@ export type GetSnippetsBySnippetIdWorkflowRunsResponses = {
   200: WorkflowRunPaginationResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowRunsResponse
-  = GetSnippetsBySnippetIdWorkflowRunsResponses[keyof GetSnippetsBySnippetIdWorkflowRunsResponses]
+export type GetSnippetsBySnippetIdWorkflowRunsResponse =
+  GetSnippetsBySnippetIdWorkflowRunsResponses[keyof GetSnippetsBySnippetIdWorkflowRunsResponses]
 
 export type PostSnippetsBySnippetIdWorkflowRunsTasksByTaskIdStopData = {
   body?: never
@@ -326,8 +341,8 @@ export type PostSnippetsBySnippetIdWorkflowRunsTasksByTaskIdStopResponses = {
   200: SimpleResultResponse
 }
 
-export type PostSnippetsBySnippetIdWorkflowRunsTasksByTaskIdStopResponse
-  = PostSnippetsBySnippetIdWorkflowRunsTasksByTaskIdStopResponses[keyof PostSnippetsBySnippetIdWorkflowRunsTasksByTaskIdStopResponses]
+export type PostSnippetsBySnippetIdWorkflowRunsTasksByTaskIdStopResponse =
+  PostSnippetsBySnippetIdWorkflowRunsTasksByTaskIdStopResponses[keyof PostSnippetsBySnippetIdWorkflowRunsTasksByTaskIdStopResponses]
 
 export type GetSnippetsBySnippetIdWorkflowRunsByRunIdData = {
   body?: never
@@ -347,8 +362,8 @@ export type GetSnippetsBySnippetIdWorkflowRunsByRunIdResponses = {
   200: WorkflowRunDetailResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowRunsByRunIdResponse
-  = GetSnippetsBySnippetIdWorkflowRunsByRunIdResponses[keyof GetSnippetsBySnippetIdWorkflowRunsByRunIdResponses]
+export type GetSnippetsBySnippetIdWorkflowRunsByRunIdResponse =
+  GetSnippetsBySnippetIdWorkflowRunsByRunIdResponses[keyof GetSnippetsBySnippetIdWorkflowRunsByRunIdResponses]
 
 export type GetSnippetsBySnippetIdWorkflowRunsByRunIdNodeExecutionsData = {
   body?: never
@@ -364,8 +379,8 @@ export type GetSnippetsBySnippetIdWorkflowRunsByRunIdNodeExecutionsResponses = {
   200: WorkflowRunNodeExecutionListResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowRunsByRunIdNodeExecutionsResponse
-  = GetSnippetsBySnippetIdWorkflowRunsByRunIdNodeExecutionsResponses[keyof GetSnippetsBySnippetIdWorkflowRunsByRunIdNodeExecutionsResponses]
+export type GetSnippetsBySnippetIdWorkflowRunsByRunIdNodeExecutionsResponse =
+  GetSnippetsBySnippetIdWorkflowRunsByRunIdNodeExecutionsResponses[keyof GetSnippetsBySnippetIdWorkflowRunsByRunIdNodeExecutionsResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsData = {
   body?: never
@@ -383,8 +398,8 @@ export type GetSnippetsBySnippetIdWorkflowsResponses = {
   200: SnippetWorkflowPaginationResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsResponse
-  = GetSnippetsBySnippetIdWorkflowsResponses[keyof GetSnippetsBySnippetIdWorkflowsResponses]
+export type GetSnippetsBySnippetIdWorkflowsResponse =
+  GetSnippetsBySnippetIdWorkflowsResponses[keyof GetSnippetsBySnippetIdWorkflowsResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDefaultWorkflowBlockConfigsData = {
   body?: never
@@ -401,8 +416,8 @@ export type GetSnippetsBySnippetIdWorkflowsDefaultWorkflowBlockConfigsResponses 
   }
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDefaultWorkflowBlockConfigsResponse
-  = GetSnippetsBySnippetIdWorkflowsDefaultWorkflowBlockConfigsResponses[keyof GetSnippetsBySnippetIdWorkflowsDefaultWorkflowBlockConfigsResponses]
+export type GetSnippetsBySnippetIdWorkflowsDefaultWorkflowBlockConfigsResponse =
+  GetSnippetsBySnippetIdWorkflowsDefaultWorkflowBlockConfigsResponses[keyof GetSnippetsBySnippetIdWorkflowsDefaultWorkflowBlockConfigsResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftData = {
   body?: never
@@ -421,8 +436,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftResponses = {
   200: SnippetWorkflowResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftResponses]
 
 export type PostSnippetsBySnippetIdWorkflowsDraftData = {
   body: SnippetDraftSyncPayload
@@ -441,8 +456,8 @@ export type PostSnippetsBySnippetIdWorkflowsDraftResponses = {
   200: SyncDraftWorkflowResponse
 }
 
-export type PostSnippetsBySnippetIdWorkflowsDraftResponse
-  = PostSnippetsBySnippetIdWorkflowsDraftResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftResponses]
+export type PostSnippetsBySnippetIdWorkflowsDraftResponse =
+  PostSnippetsBySnippetIdWorkflowsDraftResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftConfigData = {
   body?: never
@@ -457,8 +472,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftConfigResponses = {
   200: SnippetDraftConfigResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftConfigResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftConfigResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftConfigResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftConfigResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftConfigResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftConfigResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftConversationVariablesData = {
   body?: never
@@ -473,8 +488,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftConversationVariablesResponses =
   200: WorkflowDraftVariableListResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftConversationVariablesResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftConversationVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftConversationVariablesResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftConversationVariablesResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftConversationVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftConversationVariablesResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftEnvironmentVariablesData = {
   body?: never
@@ -493,8 +508,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftEnvironmentVariablesResponses = 
   200: WorkflowDraftEnvironmentVariableListResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftEnvironmentVariablesResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftEnvironmentVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftEnvironmentVariablesResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftEnvironmentVariablesResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftEnvironmentVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftEnvironmentVariablesResponses]
 
 export type PostSnippetsBySnippetIdWorkflowsDraftIterationNodesByNodeIdRunData = {
   body: SnippetIterationNodeRunPayload
@@ -514,8 +529,8 @@ export type PostSnippetsBySnippetIdWorkflowsDraftIterationNodesByNodeIdRunRespon
   200: EventStreamResponse
 }
 
-export type PostSnippetsBySnippetIdWorkflowsDraftIterationNodesByNodeIdRunResponse
-  = PostSnippetsBySnippetIdWorkflowsDraftIterationNodesByNodeIdRunResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftIterationNodesByNodeIdRunResponses]
+export type PostSnippetsBySnippetIdWorkflowsDraftIterationNodesByNodeIdRunResponse =
+  PostSnippetsBySnippetIdWorkflowsDraftIterationNodesByNodeIdRunResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftIterationNodesByNodeIdRunResponses]
 
 export type PostSnippetsBySnippetIdWorkflowsDraftLoopNodesByNodeIdRunData = {
   body: SnippetLoopNodeRunPayload
@@ -535,8 +550,8 @@ export type PostSnippetsBySnippetIdWorkflowsDraftLoopNodesByNodeIdRunResponses =
   200: EventStreamResponse
 }
 
-export type PostSnippetsBySnippetIdWorkflowsDraftLoopNodesByNodeIdRunResponse
-  = PostSnippetsBySnippetIdWorkflowsDraftLoopNodesByNodeIdRunResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftLoopNodesByNodeIdRunResponses]
+export type PostSnippetsBySnippetIdWorkflowsDraftLoopNodesByNodeIdRunResponse =
+  PostSnippetsBySnippetIdWorkflowsDraftLoopNodesByNodeIdRunResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftLoopNodesByNodeIdRunResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdLastRunData = {
   body?: never
@@ -556,8 +571,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdLastRunResponses = 
   200: WorkflowRunNodeExecutionResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdLastRunResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdLastRunResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdLastRunResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdLastRunResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdLastRunResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdLastRunResponses]
 
 export type PostSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdRunData = {
   body: SnippetDraftNodeRunPayload
@@ -577,8 +592,8 @@ export type PostSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdRunResponses = {
   200: WorkflowRunNodeExecutionResponse
 }
 
-export type PostSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdRunResponse
-  = PostSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdRunResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdRunResponses]
+export type PostSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdRunResponse =
+  PostSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdRunResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdRunResponses]
 
 export type DeleteSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesData = {
   body?: never
@@ -594,8 +609,8 @@ export type DeleteSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesRespons
   204: void
 }
 
-export type DeleteSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponse
-  = DeleteSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses[keyof DeleteSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses]
+export type DeleteSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponse =
+  DeleteSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses[keyof DeleteSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesData = {
   body?: never
@@ -611,8 +626,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses 
   200: WorkflowDraftVariableListResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftNodesByNodeIdVariablesResponses]
 
 export type PostSnippetsBySnippetIdWorkflowsDraftRunData = {
   body: SnippetDraftRunPayload
@@ -631,8 +646,8 @@ export type PostSnippetsBySnippetIdWorkflowsDraftRunResponses = {
   200: EventStreamResponse
 }
 
-export type PostSnippetsBySnippetIdWorkflowsDraftRunResponse
-  = PostSnippetsBySnippetIdWorkflowsDraftRunResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftRunResponses]
+export type PostSnippetsBySnippetIdWorkflowsDraftRunResponse =
+  PostSnippetsBySnippetIdWorkflowsDraftRunResponses[keyof PostSnippetsBySnippetIdWorkflowsDraftRunResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftSystemVariablesData = {
   body?: never
@@ -647,8 +662,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftSystemVariablesResponses = {
   200: WorkflowDraftVariableListResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftSystemVariablesResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftSystemVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftSystemVariablesResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftSystemVariablesResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftSystemVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftSystemVariablesResponses]
 
 export type DeleteSnippetsBySnippetIdWorkflowsDraftVariablesData = {
   body?: never
@@ -663,8 +678,8 @@ export type DeleteSnippetsBySnippetIdWorkflowsDraftVariablesResponses = {
   204: void
 }
 
-export type DeleteSnippetsBySnippetIdWorkflowsDraftVariablesResponse
-  = DeleteSnippetsBySnippetIdWorkflowsDraftVariablesResponses[keyof DeleteSnippetsBySnippetIdWorkflowsDraftVariablesResponses]
+export type DeleteSnippetsBySnippetIdWorkflowsDraftVariablesResponse =
+  DeleteSnippetsBySnippetIdWorkflowsDraftVariablesResponses[keyof DeleteSnippetsBySnippetIdWorkflowsDraftVariablesResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftVariablesData = {
   body?: never
@@ -682,8 +697,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftVariablesResponses = {
   200: WorkflowDraftVariableListWithoutValueResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftVariablesResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftVariablesResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftVariablesResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftVariablesResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftVariablesResponses]
 
 export type DeleteSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdData = {
   body?: never
@@ -703,8 +718,8 @@ export type DeleteSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponse
   204: void
 }
 
-export type DeleteSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponse
-  = DeleteSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses[keyof DeleteSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses]
+export type DeleteSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponse =
+  DeleteSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses[keyof DeleteSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdData = {
   body?: never
@@ -724,8 +739,8 @@ export type GetSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses =
   200: WorkflowDraftVariableResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponse
-  = GetSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses]
+export type GetSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponse =
+  GetSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses[keyof GetSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses]
 
 export type PatchSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdData = {
   body: WorkflowDraftVariableUpdatePayload
@@ -745,8 +760,8 @@ export type PatchSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses
   200: WorkflowDraftVariableResponse
 }
 
-export type PatchSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponse
-  = PatchSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses[keyof PatchSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses]
+export type PatchSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponse =
+  PatchSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses[keyof PatchSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResponses]
 
 export type PutSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResetData = {
   body?: never
@@ -767,8 +782,8 @@ export type PutSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResetRespon
   204: void
 }
 
-export type PutSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResetResponse
-  = PutSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResetResponses[keyof PutSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResetResponses]
+export type PutSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResetResponse =
+  PutSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResetResponses[keyof PutSnippetsBySnippetIdWorkflowsDraftVariablesByVariableIdResetResponses]
 
 export type GetSnippetsBySnippetIdWorkflowsPublishData = {
   body?: never
@@ -787,8 +802,8 @@ export type GetSnippetsBySnippetIdWorkflowsPublishResponses = {
   200: SnippetWorkflowResponse
 }
 
-export type GetSnippetsBySnippetIdWorkflowsPublishResponse
-  = GetSnippetsBySnippetIdWorkflowsPublishResponses[keyof GetSnippetsBySnippetIdWorkflowsPublishResponses]
+export type GetSnippetsBySnippetIdWorkflowsPublishResponse =
+  GetSnippetsBySnippetIdWorkflowsPublishResponses[keyof GetSnippetsBySnippetIdWorkflowsPublishResponses]
 
 export type PostSnippetsBySnippetIdWorkflowsPublishData = {
   body: PublishWorkflowPayload
@@ -807,8 +822,8 @@ export type PostSnippetsBySnippetIdWorkflowsPublishResponses = {
   200: PublishWorkflowResponse
 }
 
-export type PostSnippetsBySnippetIdWorkflowsPublishResponse
-  = PostSnippetsBySnippetIdWorkflowsPublishResponses[keyof PostSnippetsBySnippetIdWorkflowsPublishResponses]
+export type PostSnippetsBySnippetIdWorkflowsPublishResponse =
+  PostSnippetsBySnippetIdWorkflowsPublishResponses[keyof PostSnippetsBySnippetIdWorkflowsPublishResponses]
 
 export type PatchSnippetsBySnippetIdWorkflowsByWorkflowIdData = {
   body: WorkflowUpdatePayload
@@ -829,8 +844,8 @@ export type PatchSnippetsBySnippetIdWorkflowsByWorkflowIdResponses = {
   200: SnippetWorkflowResponse
 }
 
-export type PatchSnippetsBySnippetIdWorkflowsByWorkflowIdResponse
-  = PatchSnippetsBySnippetIdWorkflowsByWorkflowIdResponses[keyof PatchSnippetsBySnippetIdWorkflowsByWorkflowIdResponses]
+export type PatchSnippetsBySnippetIdWorkflowsByWorkflowIdResponse =
+  PatchSnippetsBySnippetIdWorkflowsByWorkflowIdResponses[keyof PatchSnippetsBySnippetIdWorkflowsByWorkflowIdResponses]
 
 export type PostSnippetsBySnippetIdWorkflowsByWorkflowIdRestoreData = {
   body?: never
@@ -851,5 +866,5 @@ export type PostSnippetsBySnippetIdWorkflowsByWorkflowIdRestoreResponses = {
   200: SyncDraftWorkflowResponse
 }
 
-export type PostSnippetsBySnippetIdWorkflowsByWorkflowIdRestoreResponse
-  = PostSnippetsBySnippetIdWorkflowsByWorkflowIdRestoreResponses[keyof PostSnippetsBySnippetIdWorkflowsByWorkflowIdRestoreResponses]
+export type PostSnippetsBySnippetIdWorkflowsByWorkflowIdRestoreResponse =
+  PostSnippetsBySnippetIdWorkflowsByWorkflowIdRestoreResponses[keyof PostSnippetsBySnippetIdWorkflowsByWorkflowIdRestoreResponses]
