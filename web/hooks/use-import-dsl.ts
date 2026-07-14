@@ -30,6 +30,7 @@ type ResponseCallback = {
   onSuccess?: (payload: DSLImportResponse) => void
   onPending?: (payload: DSLImportResponse) => void
   onFailed?: () => void
+  skipRedirectOnSuccess?: boolean
 }
 export const useImportDSL = () => {
   const { t } = useTranslation()
@@ -46,7 +47,10 @@ export const useImportDSL = () => {
   const setNeedRefresh = useSetNeedRefreshAppList()
 
   const handleImportDSL = useCallback(
-    async (payload: DSLPayload, { onSuccess, onPending, onFailed }: ResponseCallback) => {
+    async (
+      payload: DSLPayload,
+      { onSuccess, onPending, onFailed, skipRedirectOnSuccess }: ResponseCallback,
+    ) => {
       if (isFetching) return
       setIsFetching(true)
 
@@ -86,12 +90,14 @@ export const useImportDSL = () => {
           setNeedRefresh('1')
           invalidateAppList()
           await handleCheckPluginDependencies(app_id)
-          getRedirection({ id: app_id, mode: app_mode, permission_keys }, push, {
-            currentUserId,
-            resourceMaintainer: currentUserId,
-            workspacePermissionKeys,
-            isRbacEnabled,
-          })
+          if (!skipRedirectOnSuccess) {
+            getRedirection({ id: app_id, mode: app_mode, permission_keys }, push, {
+              currentUserId,
+              resourceMaintainer: currentUserId,
+              workspacePermissionKeys,
+              isRbacEnabled,
+            })
+          }
         } else if (status === DSLImportStatus.PENDING) {
           setVersions({
             importedVersion: imported_dsl_version ?? '',
@@ -124,7 +130,11 @@ export const useImportDSL = () => {
   )
 
   const handleImportDSLConfirm = useCallback(
-    async ({ onSuccess, onFailed }: Pick<ResponseCallback, 'onSuccess' | 'onFailed'>) => {
+    async ({
+      onSuccess,
+      onFailed,
+      skipRedirectOnSuccess,
+    }: Pick<ResponseCallback, 'onSuccess' | 'onFailed' | 'skipRedirectOnSuccess'>) => {
       if (isFetching) return
       setIsFetching(true)
       if (!importIdRef.current) return
@@ -143,12 +153,14 @@ export const useImportDSL = () => {
           await handleCheckPluginDependencies(app_id)
           setNeedRefresh('1')
           invalidateAppList()
-          getRedirection({ id: app_id, mode: app_mode, permission_keys }, push, {
-            currentUserId,
-            resourceMaintainer: currentUserId,
-            workspacePermissionKeys,
-            isRbacEnabled,
-          })
+          if (!skipRedirectOnSuccess) {
+            getRedirection({ id: app_id, mode: app_mode, permission_keys }, push, {
+              currentUserId,
+              resourceMaintainer: currentUserId,
+              workspacePermissionKeys,
+              isRbacEnabled,
+            })
+          }
         } else if (status === DSLImportStatus.FAILED) {
           toast.error(t(($) => $['newApp.appCreateFailed'], { ns: 'app' }))
           onFailed?.()

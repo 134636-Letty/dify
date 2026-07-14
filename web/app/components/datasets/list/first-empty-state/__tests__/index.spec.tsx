@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import { STEP_BY_STEP_TOUR_TARGETS } from '@/app/components/step-by-step-tour/target-registry'
 import DatasetFirstEmptyState from '..'
 
 vi.mock('@/next/link', () => ({
@@ -6,12 +7,9 @@ vi.mock('@/next/link', () => ({
     children,
     href,
     className,
-  }: {
-    children: React.ReactNode
-    href: string
-    className?: string
-  }) => (
-    <a href={href} className={className}>
+    ...props
+  }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) => (
+    <a href={href} className={className} {...props}>
       {children}
     </a>
   ),
@@ -27,6 +25,25 @@ describe('DatasetFirstEmptyState', () => {
     expect(
       pipelineLink.querySelector('.i-custom-vender-pipeline-pipeline-line'),
     ).toBeInTheDocument()
+  })
+
+  it('exposes step-by-step tour targets for the empty knowledge actions', () => {
+    render(<DatasetFirstEmptyState canConnectExternalDataset canCreateDataset />)
+
+    expect(screen.getByRole('link', { name: /dataset\.firstEmpty\.createTitle/ })).toHaveAttribute(
+      'data-step-by-step-tour-target',
+      STEP_BY_STEP_TOUR_TARGETS.knowledgeEmptyCreate,
+    )
+    expect(
+      screen.getByRole('link', { name: /dataset\.firstEmpty\.pipelineTitle/ }),
+    ).toHaveAttribute(
+      'data-step-by-step-tour-target',
+      STEP_BY_STEP_TOUR_TARGETS.knowledgeEmptyPipeline,
+    )
+    expect(screen.getByRole('link', { name: /dataset\.connectDataset/ })).toHaveAttribute(
+      'data-step-by-step-tour-target',
+      STEP_BY_STEP_TOUR_TARGETS.knowledgeEmptyConnect,
+    )
   })
 
   it('lays out placeholder cards with auto-fill grid columns', () => {

@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { StepByStepTourAccountState } from '@/app/components/step-by-step-tour/types'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import List from '../index'
@@ -11,11 +12,52 @@ let mockAppContextState = {
   isCurrentWorkspaceOwner: true,
   workspacePermissionKeys: ['dataset.create_and_management', 'dataset.external.connect'],
 }
+const mockStepByStepTour = vi.hoisted(() => {
+  const createState = (
+    overrides: Partial<StepByStepTourAccountState> = {},
+  ): StepByStepTourAccountState => ({
+    activeGuideGroup: undefined,
+    activeGuideIndex: undefined,
+    activeGuideIndexes: undefined,
+    activeTaskId: undefined,
+    completedTaskIds: ['home', 'studio'],
+    firstWorkspaceId: 'workspace-1',
+    manuallyDisabledWorkspaceIds: [],
+    manuallyEnabledWorkspaceIds: ['workspace-1'],
+    minimized: true,
+    skipped: false,
+    updatedAt: null,
+    ...overrides,
+  })
+  let state = createState()
+
+  return {
+    get state() {
+      return state
+    },
+    reset() {
+      state = createState()
+    },
+    setState(nextState: StepByStepTourAccountState) {
+      state = nextState
+    },
+    setTestState(overrides: Partial<StepByStepTourAccountState> = {}) {
+      state = createState(overrides)
+    },
+  }
+})
 vi.mock('@/next/navigation', () => ({
   useRouter: () => ({
     push: mockPush,
     replace: mockReplace,
   }),
+}))
+
+vi.mock('@/app/components/step-by-step-tour/storage', () => ({
+  useSetStepByStepTourAccountState: () => (nextState: StepByStepTourAccountState) => {
+    mockStepByStepTour.setState(nextState)
+  },
+  useStepByStepTourAccountStateValue: () => mockStepByStepTour.state,
 }))
 
 // Mock app context
@@ -191,6 +233,8 @@ vi.mock('@/app/components/datasets/create/website/base/checkbox-with-label', () 
 describe('List', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
+    localStorage.clear()
+    mockStepByStepTour.reset()
     mockAppContextState = {
       isCurrentWorkspaceEditor: true,
       isCurrentWorkspaceManager: true,
@@ -369,6 +413,60 @@ describe('List', () => {
       expect(
         screen.getByRole('link', { name: /dataset\.firstEmpty\.pipelineTitle/ }),
       ).toHaveAttribute('href', '/datasets/create-from-pipeline')
+    })
+
+    it('should activate the Knowledge empty walkthrough for users with all empty-state permissions', async () => {
+      mockStepByStepTour.setTestState({
+        activeTaskId: 'knowledge',
+        activeGuideIndex: 0,
+        minimized: true,
+      })
+      const { useDatasetList } = await import('@/service/knowledge/use-dataset')
+      vi.mocked(useDatasetList).mockReturnValue({
+        data: { pages: [{ data: [], total: 0 }] },
+        fetchNextPage: vi.fn(),
+        hasNextPage: false,
+        isFetching: false,
+        isFetchingNextPage: false,
+      } as unknown as ReturnType<typeof useDatasetList>)
+
+      render(<List />)
+
+      await waitFor(() => {
+        const state = mockStepByStepTour.state
+        expect(state.activeGuideGroup).toBe('knowledgeEmpty')
+        expect(state.activeGuideIndex).toBe(0)
+      })
+    })
+
+    it('should not activate the Knowledge empty walkthrough until all three empty-state actions are available', async () => {
+      mockAppContextState = {
+        isCurrentWorkspaceEditor: false,
+        isCurrentWorkspaceManager: true,
+        isCurrentWorkspaceOwner: false,
+        workspacePermissionKeys: ['dataset.create_and_management'],
+      }
+      mockStepByStepTour.setTestState({
+        activeTaskId: 'knowledge',
+        activeGuideIndex: 0,
+        minimized: true,
+      })
+      const { useDatasetList } = await import('@/service/knowledge/use-dataset')
+      vi.mocked(useDatasetList).mockReturnValue({
+        data: { pages: [{ data: [], total: 0 }] },
+        fetchNextPage: vi.fn(),
+        hasNextPage: false,
+        isFetching: false,
+        isFetchingNextPage: false,
+      } as unknown as ReturnType<typeof useDatasetList>)
+
+      render(<List />)
+
+      await waitFor(() => {
+        expect(screen.getByText('dataset.firstEmpty.title')).toBeInTheDocument()
+      })
+      const state = mockStepByStepTour.state
+      expect(state.activeGuideGroup).toBeUndefined()
     })
 
     it('should not render first empty state for legacy editors without dataset creation permissions', async () => {

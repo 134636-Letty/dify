@@ -916,8 +916,8 @@
       "count": 1
     }
   },
-  "web/app/components/apps/starred-app-card.tsx": {
-    "jsx_a11y/no-noninteractive-element-to-interactive-role": {
+  "web/app/components/apps/list.tsx": {
+    "eslint-react/set-state-in-effect": {
       "count": 1
     }
   },
@@ -3067,6 +3067,11 @@
       "count": 1
     }
   },
+  "web/app/components/datasets/list/index.tsx": {
+    "eslint-react/set-state-in-effect": {
+      "count": 1
+    }
+  },
   "web/app/components/datasets/metadata/edit-metadata-batch/add-row.tsx": {
     "jsx_a11y/click-events-have-key-events": {
       "count": 1
@@ -3176,6 +3181,11 @@
   "web/app/components/develop/md.tsx": {
     "typescript/no-explicit-any": {
       "count": 2
+    }
+  },
+  "web/app/components/explore/app-list/index.tsx": {
+    "eslint-react/set-state-in-effect": {
+      "count": 1
     }
   },
   "web/app/components/explore/item-operation/__tests__/index.spec.tsx": {
@@ -4221,14 +4231,6 @@
   "web/app/components/tools/setting/build-in/config-credentials.tsx": {
     "typescript/no-explicit-any": {
       "count": 3
-    }
-  },
-  "web/app/components/tools/tool-provider-grid.tsx": {
-    "jsx_a11y/click-events-have-key-events": {
-      "count": 1
-    },
-    "jsx_a11y/no-static-element-interactions": {
-      "count": 1
     }
   },
   "web/app/components/tools/types.ts": {

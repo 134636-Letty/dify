@@ -5,6 +5,10 @@ import { describe, expect, it, vi } from 'vitest'
 import { renderWithSystemFeatures } from '@/__tests__/utils/mock-system-features'
 import { PluginCategoryEnum, PluginSource } from '@/app/components/plugins/types'
 import {
+  getStepByStepTourTargetSelector,
+  STEP_BY_STEP_TOUR_TARGETS,
+} from '@/app/components/step-by-step-tour/target-registry'
+import {
   CurrentSystemQuotaTypeEnum,
   CustomConfigurationStatusEnum,
   QuotaUnitEnum,
@@ -559,6 +563,18 @@ describe('ModelProviderPage', () => {
     expect(screen.getByText('anthropic')).toBeInTheDocument()
   })
 
+  it('should use the empty provider state as the production tour target when no provider cards exist', () => {
+    mockProviders.splice(0)
+
+    renderModelProviderPage()
+
+    const selector = getStepByStepTourTargetSelector(
+      STEP_BY_STEP_TOUR_TARGETS.integrationModelProviderProduction,
+    )
+    const target = document.querySelector(selector)
+    expect(target).toContainElement(screen.getByText('common.modelProvider.emptyProviderTitle'))
+  })
+
   it('should use the model plugin installation list to attach plugin detail to provider cards', () => {
     mockProviders.splice(0, mockProviders.length, {
       provider: 'langgenius/openai/openai',
@@ -728,6 +744,11 @@ describe('ModelProviderPage', () => {
       expect(screen.getByText('common.modelProvider.noneConfigured')).toBeInTheDocument()
       expect(screen.queryByText('common.modelProvider.notConfigured')).not.toBeInTheDocument()
       expect(screen.getByText('common.modelProvider.emptyProviderTitle')).toBeInTheDocument()
+      const selector = getStepByStepTourTargetSelector(
+        STEP_BY_STEP_TOUR_TARGETS.integrationModelProviderProduction,
+      )
+      const target = document.querySelector(selector)
+      expect(target).toContainElement(screen.getByText('anthropic'))
     })
 
     it('should show none-configured warning when providers exist but no default models set', () => {

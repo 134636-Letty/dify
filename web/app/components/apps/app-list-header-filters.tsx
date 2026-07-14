@@ -12,6 +12,10 @@ import {
 } from '@langgenius/dify-ui/dropdown-menu'
 import { useTranslation } from 'react-i18next'
 import { SearchInput } from '@/app/components/base/search-input'
+import {
+  getStepByStepTourDropdownMenuContentProps,
+  useStepByStepTourControlledDropdown,
+} from '@/app/components/step-by-step-tour/dropdown-menu'
 import { TagFilter } from '@/features/tag-management/components/tag-filter'
 import Link from '@/next/link'
 import { AppSortFilter } from './app-sort-filter'
@@ -37,6 +41,9 @@ type AppListHeaderFiltersProps = {
   onImportDSL: () => void
   onOpenTagManagement: () => void
   showCreateButton: boolean
+  stepByStepTourCreateMenuOpen?: boolean
+  stepByStepTourCreateMenuTarget?: string
+  stepByStepTourCreateMenuHighlightPart?: string
 }
 
 export function AppListHeaderFilters({
@@ -55,8 +62,14 @@ export function AppListHeaderFilters({
   onImportDSL,
   onOpenTagManagement,
   showCreateButton,
+  stepByStepTourCreateMenuOpen,
+  stepByStepTourCreateMenuTarget,
+  stepByStepTourCreateMenuHighlightPart,
 }: AppListHeaderFiltersProps) {
   const { t } = useTranslation()
+  const createMenu = useStepByStepTourControlledDropdown({
+    controlledOpen: stepByStepTourCreateMenuOpen,
+  })
 
   return (
     <div className="flex flex-wrap items-start justify-between gap-2">
@@ -88,10 +101,11 @@ export function AppListHeaderFilters({
           {t(($) => $['studio.viewSnippets'], { ns: 'app' })}
         </Link>
         {showCreateButton && (
-          <DropdownMenu modal={false}>
+          <DropdownMenu modal={false} open={createMenu.open} onOpenChange={createMenu.onOpenChange}>
             <DropdownMenuTrigger
               render={
                 <Button
+                  data-step-by-step-tour-target={stepByStepTourCreateMenuTarget}
                   variant="primary"
                   size="medium"
                   className="gap-0.5 px-2 whitespace-nowrap shadow-xs shadow-shadow-shadow-3"
@@ -102,7 +116,18 @@ export function AppListHeaderFilters({
                 </Button>
               }
             />
-            <DropdownMenuContent placement="bottom-end" sideOffset={4} popupClassName="w-70 p-0">
+            <DropdownMenuContent
+              placement="bottom-end"
+              sideOffset={4}
+              {...getStepByStepTourDropdownMenuContentProps({
+                disableMotion: createMenu.controlled,
+                highlightPart: createMenu.controlled
+                  ? stepByStepTourCreateMenuHighlightPart
+                  : undefined,
+                interactionMode: createMenu.controlled ? 'presentation' : 'interactive',
+                popupClassName: 'w-70 p-0',
+              })}
+            >
               <div className="py-1">
                 <DropdownMenuItem
                   className="h-8 gap-1 rounded-lg px-2 py-1 system-md-regular text-text-secondary"

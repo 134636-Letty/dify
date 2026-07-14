@@ -1,4 +1,5 @@
-import { fireEvent, screen, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { STEP_BY_STEP_TOUR_TARGETS } from '@/app/components/step-by-step-tour/target-registry'
 import { renderWithNuqs } from '@/test/nuqs-testing'
 import IntegrationsPage from '../page'
 
@@ -15,12 +16,14 @@ const {
   mockCanManagement,
   mockCanDebugger,
   mockCanSetPermissions,
+  mockIsPermissionLoading,
   mockReferenceSetting,
   mockSetReferenceSettings,
 } = vi.hoisted(() => ({
   mockCanManagement: vi.fn(() => true),
   mockCanDebugger: vi.fn(() => true),
   mockCanSetPermissions: vi.fn(() => true),
+  mockIsPermissionLoading: vi.fn(() => false),
   mockReferenceSetting: vi.fn(() => ({
     permission: {
       install_permission: 'everyone',
@@ -53,6 +56,7 @@ vi.mock('@/app/components/plugins/plugin-page/use-reference-setting', () => ({
     canSetPermissions: mockCanSetPermissions(),
     canSetPluginPreferences: mockCanSetPermissions(),
     canUpdatePlugin: true,
+    isPermissionLoading: mockIsPermissionLoading(),
     setPluginPermissionSettings: mockSetReferenceSettings,
   }),
   default: () => ({
@@ -64,6 +68,7 @@ vi.mock('@/app/components/plugins/plugin-page/use-reference-setting', () => ({
     canSetPermissions: mockCanSetPermissions(),
     canSetPluginPreferences: mockCanSetPermissions(),
     canUpdatePlugin: true,
+    isPermissionLoading: mockIsPermissionLoading(),
     setReferenceSettings: mockSetReferenceSettings,
   }),
 }))
@@ -318,6 +323,7 @@ describe('IntegrationsPage', () => {
     mockCanManagement.mockReturnValue(true)
     mockCanDebugger.mockReturnValue(true)
     mockCanSetPermissions.mockReturnValue(true)
+    mockIsPermissionLoading.mockReturnValue(false)
     mockAppContextState.workspacePermissionKeys = ['tool.manage', 'mcp.manage']
     mockReferenceSetting.mockReturnValue({
       permission: {
@@ -398,6 +404,43 @@ describe('IntegrationsPage', () => {
     expect(navText.indexOf('plugin.categorySingle.extension')).toBeLessThan(
       navText.indexOf('common.settings.customEndpoint'),
     )
+  })
+
+  it('anchors step-by-step tour targets inside stable sidebar rows', () => {
+    renderIntegrationsPage({ section: 'mcp' })
+
+    const targetRows = [
+      {
+        label: 'common.settings.provider',
+        target: STEP_BY_STEP_TOUR_TARGETS.integrationModelProviderNav,
+      },
+      {
+        label: 'common.toolsPage.toolPlugin',
+        target: STEP_BY_STEP_TOUR_TARGETS.integrationToolPluginNav,
+      },
+      {
+        label: 'MCP',
+        target: STEP_BY_STEP_TOUR_TARGETS.integrationMcpNav,
+      },
+      {
+        label: 'common.settings.dataSource',
+        target: STEP_BY_STEP_TOUR_TARGETS.integrationDataSourceNav,
+      },
+      {
+        label: 'plugin.categorySingle.trigger',
+        target: STEP_BY_STEP_TOUR_TARGETS.integrationTriggerNav,
+      },
+    ]
+
+    targetRows.forEach(({ label, target }) => {
+      const row = screen.getByRole('link', { name: label })
+      const targetAnchor = row.querySelector(`[data-step-by-step-tour-target="${target}"]`)
+
+      expect(row).not.toHaveAttribute('data-step-by-step-tour-target')
+      expect(row).toHaveClass('relative')
+      expect(targetAnchor).toBeInTheDocument()
+      expect(targetAnchor).toHaveClass('absolute', 'inset-y-1', 'left-0', 'right-0')
+    })
   })
 
   it('keeps sidebar item icons outlined when the item is active', () => {
@@ -743,7 +786,7 @@ describe('IntegrationsPage', () => {
     expect(mockRouterPush).toHaveBeenCalledWith('/integrations/tools/built-in')
   })
 
-  it('keeps the tools disclosure independent from route section changes', () => {
+  it('opens the tools disclosure when a route section moves into tools', async () => {
     const view = renderIntegrationsPage(undefined, 'mcp')
 
     expect(screen.getByTestId('tool-provider-list')).toHaveAttribute('data-mounted-category', 'mcp')
@@ -777,6 +820,16 @@ describe('IntegrationsPage', () => {
       screen.queryByRole('link', { name: 'common.toolsPage.toolPlugin' }),
     ).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'MCP' })).not.toBeInTheDocument()
+
+    view.rerender(<IntegrationsPage section="mcp" />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'common.menus.tools' })).toHaveAttribute(
+        'aria-expanded',
+        'true',
+      )
+    })
+    expect(screen.getByRole('link', { name: 'MCP' })).toHaveClass('bg-state-base-active')
   })
 
   it('renders the tools header for tool sections', () => {
@@ -1038,6 +1091,21 @@ describe('IntegrationsPage', () => {
     expect(
       screen.getByRole('link', { name: 'common.settings.provider' }).parentElement,
     ).toHaveClass('py-4')
+  })
+
+  it('reserves the install action slot while install permission is loading', () => {
+    mockCanManagement.mockReturnValue(false)
+    mockIsPermissionLoading.mockReturnValue(true)
+
+    renderIntegrationsPage({ section: 'provider' })
+
+    expect(
+      screen.getByText('common.settings.integrations').parentElement?.parentElement,
+    ).toHaveClass('h-14', 'pt-1', 'pb-7')
+    expect(screen.queryByRole('button', { name: 'plugin install' })).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: 'common.settings.provider' }).parentElement,
+    ).toHaveClass('mt-6')
   })
 
   it('keeps the integrations sidebar expanded without a collapse control', () => {
