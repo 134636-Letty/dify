@@ -1157,8 +1157,10 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDefaultWorkflowBlockConfigsPat
 /**
  * Default workflow block configurations retrieved successfully
  */
-export const zGetRagPipelinesByPipelineIdWorkflowsDefaultWorkflowBlockConfigsResponse =
-  zDefaultBlockConfigsResponse
+export const zGetRagPipelinesByPipelineIdWorkflowsDefaultWorkflowBlockConfigsResponse = z.record(
+  z.string(),
+  z.unknown(),
+)
 
 export const zGetRagPipelinesByPipelineIdWorkflowsDefaultWorkflowBlockConfigsByBlockTypePath =
   z.object({
@@ -1175,7 +1177,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDefaultWorkflowBlockConfigsByB
  * Default workflow block configuration retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsDefaultWorkflowBlockConfigsByBlockTypeResponse =
-  zDefaultBlockConfigResponse
+  z.record(z.string(), z.unknown())
 
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftPath = z.object({
   pipeline_id: z.uuid(),
@@ -1209,7 +1211,7 @@ export const zPostRagPipelinesByPipelineIdWorkflowsDraftDatasourceNodesByNodeIdR
  * Success
  */
 export const zPostRagPipelinesByPipelineIdWorkflowsDraftDatasourceNodesByNodeIdRunResponse =
-  zRagPipelineOpaqueResponse
+  z.record(z.string(), z.unknown())
 
 export const zPostRagPipelinesByPipelineIdWorkflowsDraftDatasourceVariablesInspectBody =
   zDatasourceVariablesPayload
@@ -1232,7 +1234,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDraftEnvironmentVariablesPath 
  * Environment variables retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftEnvironmentVariablesResponse =
-  zEnvironmentVariableListResponse
+  zRagPipelineEnvironmentVariableListResponse
 
 export const zPostRagPipelinesByPipelineIdWorkflowsDraftIterationNodesByNodeIdRunBody =
   zNodeRunPayload
@@ -1246,7 +1248,7 @@ export const zPostRagPipelinesByPipelineIdWorkflowsDraftIterationNodesByNodeIdRu
  * Success
  */
 export const zPostRagPipelinesByPipelineIdWorkflowsDraftIterationNodesByNodeIdRunResponse =
-  zRagPipelineOpaqueResponse
+  z.record(z.string(), z.unknown())
 
 export const zPostRagPipelinesByPipelineIdWorkflowsDraftLoopNodesByNodeIdRunBody = zNodeRunPayload
 
@@ -1258,8 +1260,10 @@ export const zPostRagPipelinesByPipelineIdWorkflowsDraftLoopNodesByNodeIdRunPath
 /**
  * Success
  */
-export const zPostRagPipelinesByPipelineIdWorkflowsDraftLoopNodesByNodeIdRunResponse =
-  zRagPipelineOpaqueResponse
+export const zPostRagPipelinesByPipelineIdWorkflowsDraftLoopNodesByNodeIdRunResponse = z.record(
+  z.string(),
+  z.unknown(),
+)
 
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftNodesByNodeIdLastRunPath = z.object({
   node_id: z.string(),
@@ -1305,7 +1309,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDraftNodesByNodeIdVariablesPat
  * Node variables retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftNodesByNodeIdVariablesResponse =
-  zWorkflowDraftVariableList
+  zWorkflowDraftVariableListResponse
 
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftPreProcessingParametersPath = z.object({
   pipeline_id: z.uuid(),
@@ -1319,7 +1323,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDraftPreProcessingParametersQu
  * First step parameters retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftPreProcessingParametersResponse =
-  zRagPipelineStepParametersResponse
+  zRagPipelineVariablesResponse
 
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftProcessingParametersPath = z.object({
   pipeline_id: z.uuid(),
@@ -1333,7 +1337,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDraftProcessingParametersQuery
  * Second step parameters retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftProcessingParametersResponse =
-  zRagPipelineStepParametersResponse
+  zRagPipelineVariablesResponse
 
 export const zPostRagPipelinesByPipelineIdWorkflowsDraftRunBody = zDraftWorkflowRunPayload
 
@@ -1357,7 +1361,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDraftSystemVariablesPath = z.o
  * System variables retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftSystemVariablesResponse =
-  zWorkflowDraftVariableList
+  zWorkflowDraftVariableListResponse
 
 export const zDeleteRagPipelinesByPipelineIdWorkflowsDraftVariablesPath = z.object({
   pipeline_id: z.uuid(),
@@ -1376,7 +1380,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDraftVariablesPath = z.object(
  * Variables retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftVariablesResponse =
-  zWorkflowDraftVariableListWithoutValue
+  zWorkflowDraftVariableListWithoutValueResponse
 
 export const zDeleteRagPipelinesByPipelineIdWorkflowsDraftVariablesByVariableIdPath = z.object({
   pipeline_id: z.uuid(),
@@ -1397,7 +1401,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsDraftVariablesByVariableIdPath
  * Variable retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsDraftVariablesByVariableIdResponse =
-  zWorkflowDraftVariable
+  zWorkflowDraftVariableResponse
 
 export const zPatchRagPipelinesByPipelineIdWorkflowsDraftVariablesByVariableIdBody =
   zWorkflowDraftVariablePatchPayload
@@ -1411,7 +1415,7 @@ export const zPatchRagPipelinesByPipelineIdWorkflowsDraftVariablesByVariableIdPa
  * Variable updated successfully
  */
 export const zPatchRagPipelinesByPipelineIdWorkflowsDraftVariablesByVariableIdResponse =
-  zWorkflowDraftVariable
+  zWorkflowDraftVariableResponse
 
 export const zPutRagPipelinesByPipelineIdWorkflowsDraftVariablesByVariableIdResetPath = z.object({
   pipeline_id: z.uuid(),
@@ -1469,7 +1473,7 @@ export const zPostRagPipelinesByPipelineIdWorkflowsPublishedDatasourceNodesByNod
  * Success
  */
 export const zPostRagPipelinesByPipelineIdWorkflowsPublishedDatasourceNodesByNodeIdRunResponse =
-  zRagPipelineOpaqueResponse
+  z.record(z.string(), z.unknown())
 
 export const zGetRagPipelinesByPipelineIdWorkflowsPublishedPreProcessingParametersPath = z.object({
   pipeline_id: z.uuid(),
@@ -1483,7 +1487,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsPublishedPreProcessingParamete
  * First step parameters retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsPublishedPreProcessingParametersResponse =
-  zRagPipelineStepParametersResponse
+  zRagPipelineVariablesResponse
 
 export const zGetRagPipelinesByPipelineIdWorkflowsPublishedProcessingParametersPath = z.object({
   pipeline_id: z.uuid(),
@@ -1497,7 +1501,7 @@ export const zGetRagPipelinesByPipelineIdWorkflowsPublishedProcessingParametersQ
  * Second step parameters retrieved successfully
  */
 export const zGetRagPipelinesByPipelineIdWorkflowsPublishedProcessingParametersResponse =
-  zRagPipelineStepParametersResponse
+  zRagPipelineVariablesResponse
 
 export const zPostRagPipelinesByPipelineIdWorkflowsPublishedRunBody = zPublishedWorkflowRunPayload
 

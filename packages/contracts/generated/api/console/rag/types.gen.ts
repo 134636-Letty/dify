@@ -291,29 +291,18 @@ export type WorkflowDraftVariableListWithoutValueResponse = {
   total: number | null
 }
 
-export type WorkflowDraftVariable = {
-  description?: string
-  edited?: boolean
-  full_content?: {
-    [key: string]: unknown
-  }
-  id?: string
-  is_truncated?: boolean
-  name?: string
-  selector?: Array<string>
-  type?: string
-  value?:
-    | string
-    | number
-    | number
-    | boolean
-    | {
-        [key: string]: unknown
-      }
-    | Array<unknown>
-    | null
-  value_type?: string
-  visible?: boolean
+export type WorkflowDraftVariableResponse = {
+  description: string
+  edited: boolean
+  full_content: WorkflowDraftVariableFullContentResponse | null
+  id: string
+  is_truncated: boolean
+  name: string
+  selector: Array<string>
+  type: string
+  value: unknown
+  value_type: string
+  visible: boolean
 }
 
 export type WorkflowDraftVariablePatchPayload = {
@@ -609,11 +598,11 @@ export type OAuthSchema = {
   credentials_schema?: Array<ProviderConfig>
 }
 
-export type DatasourceProviderType
-  = | 'local_file'
-    | 'online_document'
-    | 'online_drive'
-    | 'website_crawl'
+export type DatasourceProviderType =
+  | 'local_file'
+  | 'online_document'
+  | 'online_drive'
+  | 'website_crawl'
 
 export type I18nObject = {
   en_US: string
@@ -629,25 +618,25 @@ export type Option = {
 
 export type AppSelectorScope = 'all' | 'chat' | 'completion' | 'workflow'
 
-export type ModelSelectorScope
-  = | 'llm'
-    | 'moderation'
-    | 'rerank'
-    | 'speech2text'
-    | 'text-embedding'
-    | 'tts'
-    | 'vision'
+export type ModelSelectorScope =
+  | 'llm'
+  | 'moderation'
+  | 'rerank'
+  | 'speech2text'
+  | 'text-embedding'
+  | 'tts'
+  | 'vision'
 
 export type ToolSelectorScope = 'all' | 'builtin' | 'custom' | 'workflow'
 
-export type ProviderConfigType
-  = | 'app-selector'
-    | 'array[tools]'
-    | 'boolean'
-    | 'model-selector'
-    | 'secret-input'
-    | 'select'
-    | 'text-input'
+export type ProviderConfigType =
+  | 'app-selector'
+  | 'array[tools]'
+  | 'boolean'
+  | 'model-selector'
+  | 'secret-input'
+  | 'select'
+  | 'text-input'
 
 export type DatasourceIdentity = {
   author: string
@@ -666,8 +655,8 @@ export type DatasourceParameter = {
     | boolean
     | Array<unknown>
     | {
-      [key: string]: unknown
-    }
+        [key: string]: unknown
+      }
     | null
   description: I18nObject
   label: I18nObject
@@ -690,24 +679,24 @@ export type CoreToolsEntitiesCommonEntitiesI18nObject = {
   zh_Hans?: string | null
 }
 
-export type ToolLabelEnum
-  = | 'business'
-    | 'design'
-    | 'education'
-    | 'entertainment'
-    | 'finance'
-    | 'image'
-    | 'medical'
-    | 'news'
-    | 'other'
-    | 'productivity'
-    | 'rag'
-    | 'search'
-    | 'social'
-    | 'travel'
-    | 'utilities'
-    | 'videos'
-    | 'weather'
+export type ToolLabelEnum =
+  | 'business'
+  | 'design'
+  | 'education'
+  | 'entertainment'
+  | 'finance'
+  | 'image'
+  | 'medical'
+  | 'news'
+  | 'other'
+  | 'productivity'
+  | 'rag'
+  | 'search'
+  | 'social'
+  | 'travel'
+  | 'utilities'
+  | 'videos'
+  | 'weather'
 
 export type PluginParameterAutoGenerate = {
   type: PluginParameterAutoGenerateType
@@ -723,15 +712,15 @@ export type PluginParameterTemplate = {
   enabled?: boolean
 }
 
-export type DatasourceParameterType
-  = | 'boolean'
-    | 'file'
-    | 'files'
-    | 'number'
-    | 'secret-input'
-    | 'select'
-    | 'string'
-    | 'system-files'
+export type DatasourceParameterType =
+  | 'boolean'
+  | 'file'
+  | 'files'
+  | 'number'
+  | 'secret-input'
+  | 'select'
+  | 'string'
+  | 'system-files'
 
 export type PluginParameterAutoGenerateType = 'prompt_instruction'
 
