@@ -33,6 +33,7 @@ import { MainNav } from '../index'
 
 const activeGradientMaskClassName = 'aria-[current=page]:dify-blue-glass-surface'
 const activeStackingClassName = 'aria-[current=page]:z-1'
+const mockTrackEvent = vi.hoisted(() => vi.fn())
 
 const { mockIsAgentV2Enabled, mockSwitchWorkspace, mockToastSuccess } = vi.hoisted(() => ({
   mockSwitchWorkspace: vi.fn(),
@@ -131,6 +132,10 @@ const mockAppContextState = vi.hoisted(() => ({
 
 vi.mock('@/features/agent-v2/feature-flag', () => ({
   isAgentV2Enabled: () => mockIsAgentV2Enabled(),
+}))
+
+vi.mock('@/app/components/base/amplitude', () => ({
+  trackEvent: mockTrackEvent,
 }))
 
 vi.mock('@/context/account-state', async (importOriginal) => {
@@ -840,6 +845,7 @@ describe('MainNav', () => {
     expect(screen.queryByRole('region', { name: 'Get to know Dify' })).not.toBeInTheDocument()
     expect(screen.getByRole('menu')).toBeInTheDocument()
     expect(mockPush).not.toHaveBeenCalled()
+    expect(mockTrackEvent).toHaveBeenCalledWith('step_tour', { action: 'tour_disabled' })
   })
 
   it('shows Step-by-step Tour switch off for existing accounts without a default workspace', async () => {
@@ -880,6 +886,7 @@ describe('MainNav', () => {
       expect(mockStepByStepTour.observedState?.manuallyEnabledWorkspaceIds).toEqual(['workspace-1'])
       expect(localStorage.getItem(STEP_BY_STEP_TOUR_SHELL_MODE_STORAGE_KEY)).toBe('expanded')
     })
+    expect(mockTrackEvent).toHaveBeenCalledWith('step_tour', { action: 'tour_enabled' })
 
     fireEvent.click(screen.getByRole('button', { name: 'common.mainNav.help.openMenu' }))
     expect(await screen.findByRole('menuitemcheckbox', { name: 'common.mainNav.help.stepByStepTour' }))

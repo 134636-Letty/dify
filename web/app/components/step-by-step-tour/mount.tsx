@@ -1,7 +1,13 @@
 'use client'
 
 import type { StepByStepTourGuide } from './target-registry'
-import type { StepByStepTourAccountState, StepByStepTourGuideGroup, StepByStepTourPersistentState, StepByStepTourTaskId, StepByStepTourTaskView } from './types'
+import type {
+  StepByStepTourAccountState,
+  StepByStepTourGuideGroup,
+  StepByStepTourPersistentState,
+  StepByStepTourTaskId,
+  StepByStepTourTaskView,
+} from './types'
 import { Button } from '@langgenius/dify-ui/button'
 import { cn } from '@langgenius/dify-ui/cn'
 import { Popover, PopoverContent } from '@langgenius/dify-ui/popover'
@@ -18,15 +24,11 @@ import { currentWorkspaceAtom, isCurrentWorkspaceManagerAtom } from '@/context/w
 import { systemFeaturesQueryOptions } from '@/features/system-features/client'
 import { usePathname, useRouter } from '@/next/navigation'
 import { hasPermission } from '@/utils/permission'
+import { getStepByStepTourPermissionVariant, trackStepByStepTourEvent } from './analytics'
 import {
-  buildStepByStepTourScopedWorkspaceProperties,
-  buildStepByStepTourWorkspaceProperties,
-  getStepByStepTourPermissionVariant,
-  getStepByStepTourWorkspaceScope,
-  STEP_BY_STEP_TOUR_ANALYTICS_EVENTS,
-  trackStepByStepTourEvent,
-} from './analytics'
-import { useSetStepByStepTourSkipRecoveryVisible, useStepByStepTourSkipRecoveryVisible } from './atoms'
+  useSetStepByStepTourSkipRecoveryVisible,
+  useStepByStepTourSkipRecoveryVisible,
+} from './atoms'
 import { StepByStepTourCoachmark } from './coachmark'
 import { STEP_BY_STEP_TOUR_TASKS } from './constants'
 import { FloatingChecklist } from './floating-widget'
@@ -51,43 +53,32 @@ type StepByStepTourTask = (typeof STEP_BY_STEP_TOUR_TASKS)[number]
 const hasCompletedAllStepByStepTourTasks = (
   completedTaskIds: StepByStepTourTaskId[],
   tasks: readonly StepByStepTourTask[],
-) =>
-  tasks.every(task => completedTaskIds.includes(task.id))
-
-const getStepByStepTourTaskIndex = (
-  taskId: StepByStepTourTaskId,
-  tasks: readonly StepByStepTourTask[],
-) =>
-  tasks.findIndex(task => task.id === taskId)
+) => tasks.every((task) => completedTaskIds.includes(task.id))
 
 const isPermissionFallbackGuideGroup = (
   guideGroup: StepByStepTourGuideGroup | undefined,
-): guideGroup is Extract<StepByStepTourGuideGroup, 'homeNoCreate' | 'integrationLimitedAccess' | 'studioNoCreateEmpty' | 'studioNoCreateWithApps'> =>
-  guideGroup === 'homeNoCreate'
-  || guideGroup === 'integrationLimitedAccess'
-  || guideGroup === 'studioNoCreateEmpty'
-  || guideGroup === 'studioNoCreateWithApps'
+): guideGroup is Extract<
+  StepByStepTourGuideGroup,
+  'homeNoCreate' | 'integrationLimitedAccess' | 'studioNoCreateEmpty' | 'studioNoCreateWithApps'
+> =>
+  guideGroup === 'homeNoCreate' ||
+  guideGroup === 'integrationLimitedAccess' ||
+  guideGroup === 'studioNoCreateEmpty' ||
+  guideGroup === 'studioNoCreateWithApps'
 
 const shouldHideOnPathname = (pathname: string) =>
   pathname.startsWith('/app/') || pathname.includes('/installed/')
 
-const isGuideEligibleForPlan = (
-  guide: StepByStepTourGuide,
-  canSetPluginPreferences: boolean,
-) => guide.target !== STEP_BY_STEP_TOUR_TARGETS.integrationUpdateSettings || canSetPluginPreferences
+const isGuideEligibleForPlan = (guide: StepByStepTourGuide, canSetPluginPreferences: boolean) =>
+  guide.target !== STEP_BY_STEP_TOUR_TARGETS.integrationUpdateSettings || canSetPluginPreferences
 
-const isOptionalGuideTargetAvailable = (
-  guide: StepByStepTourGuide,
-  pathname: string,
-) => {
-  if (!guide.optional)
-    return true
+const isOptionalGuideTargetAvailable = (guide: StepByStepTourGuide, pathname: string) => {
+  if (!guide.optional) return true
 
   if (guide.integrationSection && pathname !== buildIntegrationPath(guide.integrationSection))
     return true
 
-  if (typeof document === 'undefined')
-    return true
+  if (typeof document === 'undefined') return true
 
   return Boolean(document.querySelector(getStepByStepTourTargetSelector(guide.target)))
 }
@@ -100,8 +91,7 @@ const isElementVerticallyVisible = (element: HTMLElement) => {
 }
 
 const scrollTourTargetIntoView = (element: HTMLElement) => {
-  if (isElementVerticallyVisible(element))
-    return
+  if (isElementVerticallyVisible(element)) return
 
   element.scrollIntoView({
     block: 'nearest',
@@ -109,8 +99,7 @@ const scrollTourTargetIntoView = (element: HTMLElement) => {
   })
 }
 
-const createGuideIndexes = (guides: StepByStepTourGuide[]) =>
-  guides.map((_, index) => index)
+const createGuideIndexes = (guides: StepByStepTourGuide[]) => guides.map((_, index) => index)
 
 const getActiveGuideIndexes = (
   guides: StepByStepTourGuide[],
@@ -118,10 +107,9 @@ const getActiveGuideIndexes = (
 ) => {
   const fallbackGuideIndexes = createGuideIndexes(guides)
 
-  if (!guideIndexes?.length)
-    return fallbackGuideIndexes
+  if (!guideIndexes?.length) return fallbackGuideIndexes
 
-  const validGuideIndexes = guideIndexes.filter(index => index >= 0 && index < guides.length)
+  const validGuideIndexes = guideIndexes.filter((index) => index >= 0 && index < guides.length)
   return validGuideIndexes.length > 0 ? validGuideIndexes : fallbackGuideIndexes
 }
 
@@ -129,9 +117,7 @@ type StepByStepTourMountProps = {
   className?: string
 }
 
-export default function StepByStepTourMount({
-  className,
-}: StepByStepTourMountProps) {
+export default function StepByStepTourMount({ className }: StepByStepTourMountProps) {
   const router = useRouter()
   const pathname = usePathname()
   const docLink = useDocLink()
@@ -139,7 +125,7 @@ export default function StepByStepTourMount({
   const currentWorkspace = useAtomValue(currentWorkspaceAtom)
   const isCurrentWorkspaceManager = useAtomValue(isCurrentWorkspaceManagerAtom)
   const workspacePermissionKeys = useAtomValue(workspacePermissionKeysAtom)
-  const hasBlockingModalOpen = useModalContextSelector(state => state.hasBlockingModalOpen)
+  const hasBlockingModalOpen = useModalContextSelector((state) => state.hasBlockingModalOpen)
   const { data: systemFeatures } = useQuery(systemFeaturesQueryOptions())
   const accountState = useStepByStepTourAccountValue()
   const setAccountState = useSetStepByStepTourAccount()
@@ -162,143 +148,137 @@ export default function StepByStepTourMount({
   const homeGuideGroup: Extract<StepByStepTourGuideGroup, 'homeNoCreate'> | undefined = canCreateApp
     ? undefined
     : 'homeNoCreate'
-  const hasKnowledgeWalkthroughPermissions = hasPermission(workspacePermissionKeys, 'dataset.create_and_management')
-    && hasPermission(workspacePermissionKeys, 'dataset.external.connect')
-  const canSetPluginPreferences = hasPermission(workspacePermissionKeys, 'plugin.plugin_preferences')
-  const integrationGuideGroup: Extract<StepByStepTourGuideGroup, 'integrationLimitedAccess'> | undefined = isCurrentWorkspaceManager
-    ? undefined
-    : 'integrationLimitedAccess'
+  const hasKnowledgeWalkthroughPermissions =
+    hasPermission(workspacePermissionKeys, 'dataset.create_and_management') &&
+    hasPermission(workspacePermissionKeys, 'dataset.external.connect')
+  const canSetPluginPreferences = hasPermission(
+    workspacePermissionKeys,
+    'plugin.plugin_preferences',
+  )
+  const integrationGuideGroup:
+    | Extract<StepByStepTourGuideGroup, 'integrationLimitedAccess'>
+    | undefined = isCurrentWorkspaceManager ? undefined : 'integrationLimitedAccess'
   const hasIntegrationWalkthroughPermissions = !integrationGuideGroup
 
-  useEffect(() => () => {
-    if (skipTimeoutRef.current)
-      window.clearTimeout(skipTimeoutRef.current)
-  }, [])
+  useEffect(
+    () => () => {
+      if (skipTimeoutRef.current) window.clearTimeout(skipTimeoutRef.current)
+    },
+    [],
+  )
 
-  const enabledForCurrentWorkspace = getStepByStepTourEnabledForCurrentWorkspace(accountState, currentWorkspaceId)
+  const enabledForCurrentWorkspace = getStepByStepTourEnabledForCurrentWorkspace(
+    accountState,
+    currentWorkspaceId,
+  )
   const completedTaskIds = accountState.completedTaskIds
   const learnDifyEnabled = systemFeatures?.enable_learn_app ?? true
   const stepByStepTourFeatureEnabled = Boolean(systemFeatures?.enable_step_by_step_tour)
   const availableTasks = learnDifyEnabled
     ? STEP_BY_STEP_TOUR_TASKS
-    : STEP_BY_STEP_TOUR_TASKS.filter(task => task.id !== 'home')
-  const availableTaskIds = availableTasks.map(task => task.id)
-  const completedAvailableTaskIds = completedTaskIds.filter(taskId => availableTaskIds.includes(taskId))
+    : STEP_BY_STEP_TOUR_TASKS.filter((task) => task.id !== 'home')
+  const availableTaskIds = availableTasks.map((task) => task.id)
+  const completedAvailableTaskIds = completedTaskIds.filter((taskId) =>
+    availableTaskIds.includes(taskId),
+  )
   const allTasksCompleted = hasCompletedAllStepByStepTourTasks(completedTaskIds, availableTasks)
-  const currentTask = availableTasks.find(task => !completedTaskIds.includes(task.id))
+  const currentTask = availableTasks.find((task) => !completedTaskIds.includes(task.id))
   const activeTask = accountState.activeTaskId
-    ? availableTasks.find(task => task.id === accountState.activeTaskId)
+    ? availableTasks.find((task) => task.id === accountState.activeTaskId)
     : undefined
-  const activeGuideGroup: StepByStepTourGuideGroup | undefined = activeTask?.id === 'home'
-    ? homeGuideGroup
-    : activeTask?.id === 'integration'
-      ? integrationGuideGroup
-      : accountState.activeGuideGroup
+  const activeGuideGroup: StepByStepTourGuideGroup | undefined =
+    activeTask?.id === 'home'
+      ? homeGuideGroup
+      : activeTask?.id === 'integration'
+        ? integrationGuideGroup
+        : accountState.activeGuideGroup
   const activeGuides = activeTask ? getStepByStepTourGuides(activeTask.id, activeGuideGroup) : []
   const activeGuideIndex = accountState.activeGuideIndex ?? 0
   const activeGuide = activeGuides[activeGuideIndex]
   const hasActiveGuide = Boolean(activeTask && activeGuide)
   const minimized = Boolean(activeTask) || shellMode === 'collapsed'
-  const activeGuideIndexes = activeGuides.length > 0
-    ? getActiveGuideIndexes(activeGuides, accountState.activeGuideIndexes)
-        .filter(index => isGuideEligibleForPlan(activeGuides[index]!, canSetPluginPreferences))
-        .filter(index => isOptionalGuideTargetAvailable(activeGuides[index]!, pathname))
-    : []
-  const activeGuidePlanIndex = activeGuideIndexes.findIndex(index => index === activeGuideIndex)
-  const activeStepIndex = activeGuideIndexes.length > 0
-    ? activeGuidePlanIndex === -1
-      ? activeGuideIndexes.filter(index => index < activeGuideIndex).length
-      : activeGuidePlanIndex
-    : activeGuideIndex
+  const activeGuideIndexes =
+    activeGuides.length > 0
+      ? getActiveGuideIndexes(activeGuides, accountState.activeGuideIndexes)
+          .filter((index) => isGuideEligibleForPlan(activeGuides[index]!, canSetPluginPreferences))
+          .filter((index) => isOptionalGuideTargetAvailable(activeGuides[index]!, pathname))
+      : []
+  const activeGuidePlanIndex = activeGuideIndexes.findIndex((index) => index === activeGuideIndex)
+  const activeStepIndex =
+    activeGuideIndexes.length > 0
+      ? activeGuidePlanIndex === -1
+        ? activeGuideIndexes.filter((index) => index < activeGuideIndex).length
+        : activeGuidePlanIndex
+      : activeGuideIndex
   const activeStepTotal = activeGuideIndexes.length || activeGuides.length
-  const activeGuideAnalyticsProperties = activeTask && activeGuide
-    ? {
-        task_id: activeTask.id,
-        guide_group: activeGuideGroup ?? null,
-        guide_plan_index: activeStepIndex,
-        guide_plan_total: activeStepTotal,
-        guide_target: activeGuide.target,
-      }
-    : undefined
-  const visible = IS_CLOUD_EDITION
-    && stepByStepTourFeatureEnabled
-    && enabledForCurrentWorkspace
-    && (hasActiveGuide || !shouldHideOnPathname(pathname))
+  const activeGuideAnalyticsProperties =
+    activeTask && activeGuide
+      ? {
+          task_id: activeTask.id,
+          guide_id: activeGuide.id,
+        }
+      : undefined
+  const visible =
+    IS_CLOUD_EDITION &&
+    stepByStepTourFeatureEnabled &&
+    enabledForCurrentWorkspace &&
+    (hasActiveGuide || !shouldHideOnPathname(pathname))
   const overlayVisible = visible && !hasBlockingModalOpen
-  const completionPromptVisible = visible
-    && allTasksCompleted
-    && !activeTask
+  const completionPromptVisible = visible && allTasksCompleted && !activeTask
   const checklistMinimized = completionPromptVisible ? false : minimized
   const expanded = !checklistMinimized
   const activeTargetElement = useStepByStepTourTarget(activeGuide?.target)
-  const activeGuidePlacement = activeGuide?.target === STEP_BY_STEP_TOUR_TARGETS.studioEmptyLearnDify
-    ? 'top'
-    : activeGuide?.target === STEP_BY_STEP_TOUR_TARGETS.integration
-      ? 'right'
-      : 'bottom'
-  const workspaceProperties = buildStepByStepTourWorkspaceProperties({ currentWorkspaceId })
-  const scopedWorkspaceProperties = buildStepByStepTourScopedWorkspaceProperties({
-    accountState,
-    currentWorkspaceId,
-  })
-
-  const getPermissionVariant = (taskId: StepByStepTourTaskId) => getStepByStepTourPermissionVariant({
-    canCreateApp,
-    hasIntegrationWalkthroughPermissions,
-    hasKnowledgeWalkthroughPermissions,
-    taskId,
-  })
-
-  const getTaskStatus = (taskId: StepByStepTourTaskId) =>
-    taskId === currentTask?.id ? 'current' : 'pending'
+  const activeGuidePlacement =
+    activeGuide?.target === STEP_BY_STEP_TOUR_TARGETS.studioEmptyLearnDify
+      ? 'top'
+      : activeGuide?.target === STEP_BY_STEP_TOUR_TARGETS.integration
+        ? 'right'
+        : 'bottom'
+  const getPermissionVariant = (taskId: StepByStepTourTaskId) =>
+    getStepByStepTourPermissionVariant({
+      canCreateApp,
+      hasIntegrationWalkthroughPermissions,
+      hasKnowledgeWalkthroughPermissions,
+      taskId,
+    })
 
   const trackTaskCompleted = (
     persistentState: StepByStepTourPersistentState,
     taskId: StepByStepTourTaskId,
-    completionSource: 'external_action' | 'manual' | 'permission_fallback' | 'walkthrough_finished',
   ) => {
-    const completedAvailableTaskIds = persistentState.completedTaskIds.filter(completedTaskId => availableTaskIds.includes(completedTaskId))
+    const completedAvailableTaskIds = persistentState.completedTaskIds.filter((completedTaskId) =>
+      availableTaskIds.includes(completedTaskId),
+    )
 
-    trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.taskCompleted, {
-      ...workspaceProperties,
+    trackStepByStepTourEvent({
+      action: 'task_completed',
       task_id: taskId,
       completed_task_count: completedAvailableTaskIds.length,
-      completion_source: completionSource,
       permission_variant: getPermissionVariant(taskId),
       task_total: availableTasks.length,
     })
 
     if (hasCompletedAllStepByStepTourTasks(persistentState.completedTaskIds, availableTasks)) {
-      trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.completed, {
-        ...buildStepByStepTourScopedWorkspaceProperties({
-          accountState: persistentState,
-          currentWorkspaceId,
-        }),
-        completed_task_ids: completedAvailableTaskIds,
+      trackStepByStepTourEvent({
+        action: 'tour_completed',
+        completed_task_count: completedAvailableTaskIds.length,
         task_total: availableTasks.length,
       })
     }
   }
 
-  const trackTourSkipped = (
-    persistentState: StepByStepTourPersistentState,
-    source: 'completion_prompt' | 'floating_checklist',
-  ) => {
-    trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.skipped, {
-      ...workspaceProperties,
-      active_task_id: activeTask?.id ?? null,
-      at_state: source === 'completion_prompt'
-        ? 'completion_prompt'
-        : checklistMinimized ? 'minimized' : 'expanded',
-      completed_task_count: persistentState.completedTaskIds.filter(taskId => availableTaskIds.includes(taskId)).length,
-      skip_scope: 'tour',
-      source,
+  const trackTourSkipped = (persistentState: StepByStepTourPersistentState) => {
+    trackStepByStepTourEvent({
+      action: 'tour_skipped',
+      task_id: activeTask?.id,
+      completed_task_count: persistentState.completedTaskIds.filter((taskId) =>
+        availableTaskIds.includes(taskId),
+      ).length,
     })
   }
 
   useEffect(() => {
-    if (activeTask?.id !== 'integration' || !activeGuide?.integrationSection)
-      return
+    if (activeTask?.id !== 'integration' || !activeGuide?.integrationSection) return
 
     const activeGuideRoute = buildIntegrationPath(activeGuide.integrationSection)
     if (pathname === activeGuideRoute) {
@@ -306,78 +286,61 @@ export default function StepByStepTourMount({
       return
     }
 
-    if (lastRequestedIntegrationRouteRef.current === activeGuideRoute)
-      return
+    if (lastRequestedIntegrationRouteRef.current === activeGuideRoute) return
 
     lastRequestedIntegrationRouteRef.current = activeGuideRoute
     router.push(activeGuideRoute)
   }, [activeGuide?.integrationSection, activeTask?.id, pathname, router])
 
   useEffect(() => {
-    if (!activeTargetElement)
-      return
+    if (!activeTargetElement) return
 
     scrollTourTargetIntoView(activeTargetElement)
   }, [activeGuide?.target, activeTargetElement])
 
   useEffect(() => {
-    if (!visible)
-      return
+    if (!visible) return
 
-    const triggerReason = previousSkippedRef.current
-      ? 'reopen_after_skip'
-      : getStepByStepTourWorkspaceScope({ accountState, currentWorkspaceId }) === 'first_workspace'
+    const entryPoint = previousSkippedRef.current
+      ? 'reenabled_after_skip'
+      : accountState.firstWorkspaceId === currentWorkspaceId
         ? 'first_workspace'
-        : 'manual_open'
-    const shownAnalyticsKey = `${currentWorkspaceId}:${triggerReason}`
-    if (shownAnalyticsKeyRef.current === shownAnalyticsKey)
-      return
+        : 'help_menu_enabled'
+    const shownAnalyticsKey = `${currentWorkspaceId}:${entryPoint}`
+    if (shownAnalyticsKeyRef.current === shownAnalyticsKey) return
 
     shownAnalyticsKeyRef.current = shownAnalyticsKey
-    trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.shown, {
-      ...scopedWorkspaceProperties,
+    trackStepByStepTourEvent({
+      action: 'tour_shown',
       completed_task_count: completedAvailableTaskIds.length,
-      initial_state: checklistMinimized ? 'minimized' : 'expanded',
+      entry_point: entryPoint,
       task_total: availableTasks.length,
-      trigger_reason: triggerReason,
     })
   }, [
     accountState,
     availableTasks.length,
-    checklistMinimized,
     completedAvailableTaskIds.length,
     currentWorkspaceId,
-    scopedWorkspaceProperties,
     visible,
   ])
 
   useEffect(() => {
-    if (!visible || !activeTask || !activeGuide || !activeTargetElement)
-      return
+    if (!visible || !activeTask || !activeGuide || !activeTargetElement) return
 
-    const guideAnalyticsProperties = {
-      task_id: activeTask.id,
-      guide_group: activeGuideGroup ?? null,
-      guide_plan_index: activeStepIndex,
-      guide_plan_total: activeStepTotal,
-      guide_target: activeGuide.target,
-    }
+    const guideAnalyticsProperties = { task_id: activeTask.id, guide_id: activeGuide.id }
 
     const stepShownAnalyticsKey = [
       currentWorkspaceId,
       guideAnalyticsProperties.task_id,
-      guideAnalyticsProperties.guide_group,
-      guideAnalyticsProperties.guide_target,
-      guideAnalyticsProperties.guide_plan_index,
+      guideAnalyticsProperties.guide_id,
     ].join(':')
-    if (stepShownAnalyticsKeyRef.current === stepShownAnalyticsKey)
-      return
+    if (stepShownAnalyticsKeyRef.current === stepShownAnalyticsKey) return
 
     stepShownAnalyticsKeyRef.current = stepShownAnalyticsKey
-    trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.stepShown, {
-      ...workspaceProperties,
-      ...guideAnalyticsProperties,
-      interaction_policy: getStepByStepTourGuideInteractionPolicy(activeGuide, activeTask.canClickThrough),
+    trackStepByStepTourEvent({
+      action: 'guide_shown',
+      task_id: guideAnalyticsProperties.task_id,
+      guide_id: guideAnalyticsProperties.guide_id,
     })
   }, [
     activeGuide,
@@ -388,87 +351,94 @@ export default function StepByStepTourMount({
     activeTask,
     currentWorkspaceId,
     visible,
-    workspaceProperties,
   ])
 
   useEffect(() => {
-    if (!visible)
-      return
+    if (!visible) return
 
     if (currentTask?.id === 'knowledge' && !hasKnowledgeWalkthroughPermissions) {
       const fallbackAnalyticsKey = `${currentWorkspaceId}:knowledge:no_knowledge_permission`
-      if (permissionFallbackAnalyticsKeyRef.current === fallbackAnalyticsKey)
-        return
+      if (permissionFallbackAnalyticsKeyRef.current === fallbackAnalyticsKey) return
 
       permissionFallbackAnalyticsKeyRef.current = fallbackAnalyticsKey
-      trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.permissionFallbackViewed, {
-        ...workspaceProperties,
+      trackStepByStepTourEvent({
+        action: 'permission_fallback_shown',
         task_id: 'knowledge',
-        fallback_behavior: 'mark_complete',
-        guide_group: null,
-        restriction: 'no_knowledge_permission',
-        role: currentWorkspace.role,
+        permission_variant: 'no_knowledge_permission',
       })
       return
     }
 
-    if (!activeTask)
-      return
+    if (!activeTask) return
 
-    if (!isPermissionFallbackGuideGroup(activeGuideGroup))
-      return
+    if (!isPermissionFallbackGuideGroup(activeGuideGroup)) return
 
     const fallbackAnalyticsKey = `${currentWorkspaceId}:${activeTask.id}:${activeGuideGroup}`
-    if (permissionFallbackAnalyticsKeyRef.current === fallbackAnalyticsKey)
-      return
+    if (permissionFallbackAnalyticsKeyRef.current === fallbackAnalyticsKey) return
 
     permissionFallbackAnalyticsKeyRef.current = fallbackAnalyticsKey
-    trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.permissionFallbackViewed, {
-      ...workspaceProperties,
+    trackStepByStepTourEvent({
+      action: 'permission_fallback_shown',
       task_id: activeTask.id,
-      fallback_behavior: activeGuideGroup === 'integrationLimitedAccess' ? 'show_limited_access_guide' : 'show_no_create_guide',
-      guide_group: activeGuideGroup,
-      restriction: activeTask.id === 'integration' ? 'no_integration_permission' : 'no_create_permission',
-      role: currentWorkspace.role,
+      permission_variant:
+        activeTask.id === 'integration' ? 'no_integration_permission' : 'no_create',
     })
   }, [
     activeGuideGroup,
     activeTask,
     currentTask?.id,
-    currentWorkspace.role,
     currentWorkspaceId,
     hasKnowledgeWalkthroughPermissions,
     visible,
-    workspaceProperties,
   ])
 
   useEffect(() => {
     previousSkippedRef.current = accountState.skipped
   }, [accountState.skipped])
 
-  if (!visible && !skipRecoveryVisible)
-    return null
-  const title = t($ => $['stepByStepTour.title'])
-  const taskCopy: Record<StepByStepTourTaskId, Pick<StepByStepTourTaskView, 'title' | 'description' | 'primaryActionLabel'>> = {
+  if (!visible && !skipRecoveryVisible) return null
+  const title = t(($) => $['stepByStepTour.title'])
+  const taskCopy: Record<
+    StepByStepTourTaskId,
+    Pick<StepByStepTourTaskView, 'title' | 'description' | 'primaryActionLabel'>
+  > = {
     home: {
-      title: canCreateApp ? t($ => $['stepByStepTour.tasks.home.title']) : t($ => $['stepByStepTour.tasks.home.noCreate.title']),
-      description: canCreateApp ? t($ => $['stepByStepTour.tasks.home.description']) : t($ => $['stepByStepTour.tasks.home.noCreate.description']),
-      primaryActionLabel: t($ => $['stepByStepTour.tasks.home.primaryActionLabel']),
+      title: canCreateApp
+        ? t(($) => $['stepByStepTour.tasks.home.title'])
+        : t(($) => $['stepByStepTour.tasks.home.noCreate.title']),
+      description: canCreateApp
+        ? t(($) => $['stepByStepTour.tasks.home.description'])
+        : t(($) => $['stepByStepTour.tasks.home.noCreate.description']),
+      primaryActionLabel: t(($) => $['stepByStepTour.tasks.home.primaryActionLabel']),
     },
     studio: {
-      title: canCreateApp ? t($ => $['stepByStepTour.tasks.studio.title']) : t($ => $['stepByStepTour.tasks.studio.noCreate.title']),
-      description: canCreateApp ? t($ => $['stepByStepTour.tasks.studio.description']) : t($ => $['stepByStepTour.tasks.studio.noCreate.description']),
-      primaryActionLabel: t($ => $['stepByStepTour.tasks.studio.primaryActionLabel']),
+      title: canCreateApp
+        ? t(($) => $['stepByStepTour.tasks.studio.title'])
+        : t(($) => $['stepByStepTour.tasks.studio.noCreate.title']),
+      description: canCreateApp
+        ? t(($) => $['stepByStepTour.tasks.studio.description'])
+        : t(($) => $['stepByStepTour.tasks.studio.noCreate.description']),
+      primaryActionLabel: t(($) => $['stepByStepTour.tasks.studio.primaryActionLabel']),
     },
     knowledge: {
-      title: hasKnowledgeWalkthroughPermissions ? t($ => $['stepByStepTour.tasks.knowledge.title']) : t($ => $['stepByStepTour.tasks.knowledge.noPermission.title']),
-      description: hasKnowledgeWalkthroughPermissions ? t($ => $['stepByStepTour.tasks.knowledge.description']) : t($ => $['stepByStepTour.tasks.knowledge.noPermission.description']),
-      primaryActionLabel: hasKnowledgeWalkthroughPermissions ? t($ => $['stepByStepTour.tasks.knowledge.primaryActionLabel']) : t($ => $['stepByStepTour.tasks.knowledge.noPermission.primaryActionLabel']),
+      title: hasKnowledgeWalkthroughPermissions
+        ? t(($) => $['stepByStepTour.tasks.knowledge.title'])
+        : t(($) => $['stepByStepTour.tasks.knowledge.noPermission.title']),
+      description: hasKnowledgeWalkthroughPermissions
+        ? t(($) => $['stepByStepTour.tasks.knowledge.description'])
+        : t(($) => $['stepByStepTour.tasks.knowledge.noPermission.description']),
+      primaryActionLabel: hasKnowledgeWalkthroughPermissions
+        ? t(($) => $['stepByStepTour.tasks.knowledge.primaryActionLabel'])
+        : t(($) => $['stepByStepTour.tasks.knowledge.noPermission.primaryActionLabel']),
     },
     integration: {
-      title: hasIntegrationWalkthroughPermissions ? t($ => $['stepByStepTour.tasks.integration.title']) : t($ => $['stepByStepTour.tasks.integration.noPermission.title']),
-      description: hasIntegrationWalkthroughPermissions ? t($ => $['stepByStepTour.tasks.integration.description']) : t($ => $['stepByStepTour.tasks.integration.noPermission.description']),
-      primaryActionLabel: t($ => $['stepByStepTour.tasks.integration.primaryActionLabel']),
+      title: hasIntegrationWalkthroughPermissions
+        ? t(($) => $['stepByStepTour.tasks.integration.title'])
+        : t(($) => $['stepByStepTour.tasks.integration.noPermission.title']),
+      description: hasIntegrationWalkthroughPermissions
+        ? t(($) => $['stepByStepTour.tasks.integration.description'])
+        : t(($) => $['stepByStepTour.tasks.integration.noPermission.description']),
+      primaryActionLabel: t(($) => $['stepByStepTour.tasks.integration.primaryActionLabel']),
     },
   }
   const tasks = availableTasks.map((task): StepByStepTourTaskView => {
@@ -479,9 +449,7 @@ export default function StepByStepTourMount({
       ...taskCopy[task.id],
       id: task.id,
       iconClassName: knowledgeUnavailable ? 'i-ri-lock-line' : task.iconClassName,
-      status: completed
-        ? 'completed'
-        : task.id === currentTask?.id ? 'current' : 'pending',
+      status: completed ? 'completed' : task.id === currentTask?.id ? 'current' : 'pending',
       canToggleCompletion: false,
     }
   })
@@ -491,14 +459,13 @@ export default function StepByStepTourMount({
   }
 
   const skipTour = () => {
-    if (checklistExiting)
-      return
+    if (checklistExiting) return
 
     setChecklistExiting(true)
 
     skipTimeoutRef.current = window.setTimeout(() => {
       stepByStepTourActions.skipTour(currentWorkspaceId, {
-        onSuccess: state => trackTourSkipped(state, 'floating_checklist'),
+        onSuccess: trackTourSkipped,
       })
       setChecklistExiting(false)
       setSkipRecoveryVisible(true)
@@ -508,15 +475,10 @@ export default function StepByStepTourMount({
   const skipActiveGuide = () => {
     const guideAnalyticsProperties = activeGuideAnalyticsProperties
     if (guideAnalyticsProperties) {
-      trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.stepCtaClicked, {
-        ...workspaceProperties,
-        ...guideAnalyticsProperties,
-        cta_type: 'skip_walkthrough',
-      })
-      trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.walkthroughSkipped, {
-        ...workspaceProperties,
-        ...guideAnalyticsProperties,
-        skip_scope: 'walkthrough',
+      trackStepByStepTourEvent({
+        action: 'guide_skipped',
+        task_id: guideAnalyticsProperties.task_id,
+        guide_id: guideAnalyticsProperties.guide_id,
       })
     }
 
@@ -534,18 +496,18 @@ export default function StepByStepTourMount({
   const getNextVisibleActiveGuideIndex = (startIndex: number) => {
     if (activeGuideIndexes.length > 0) {
       let nextGuideIndexes = activeGuideIndexes
-      let nextGuideIndex = nextGuideIndexes.find(index => index >= startIndex)
+      let nextGuideIndex = nextGuideIndexes.find((index) => index >= startIndex)
 
       while (nextGuideIndex !== undefined) {
         if (
-          isGuideEligibleForPlan(activeGuides[nextGuideIndex]!, canSetPluginPreferences)
-          && isOptionalGuideTargetAvailable(activeGuides[nextGuideIndex]!, pathname)
+          isGuideEligibleForPlan(activeGuides[nextGuideIndex]!, canSetPluginPreferences) &&
+          isOptionalGuideTargetAvailable(activeGuides[nextGuideIndex]!, pathname)
         ) {
           return { activeGuideIndex: nextGuideIndex, activeGuideIndexes: nextGuideIndexes }
         }
 
-        nextGuideIndexes = nextGuideIndexes.filter(index => index !== nextGuideIndex)
-        nextGuideIndex = nextGuideIndexes.find(index => index >= startIndex)
+        nextGuideIndexes = nextGuideIndexes.filter((index) => index !== nextGuideIndex)
+        nextGuideIndex = nextGuideIndexes.find((index) => index >= startIndex)
       }
 
       return { activeGuideIndex: -1, activeGuideIndexes: nextGuideIndexes }
@@ -553,8 +515,8 @@ export default function StepByStepTourMount({
 
     for (let index = startIndex; index < activeGuides.length; index += 1) {
       if (
-        isGuideEligibleForPlan(activeGuides[index]!, canSetPluginPreferences)
-        && isOptionalGuideTargetAvailable(activeGuides[index]!, pathname)
+        isGuideEligibleForPlan(activeGuides[index]!, canSetPluginPreferences) &&
+        isOptionalGuideTargetAvailable(activeGuides[index]!, pathname)
       ) {
         return { activeGuideIndex: index, activeGuideIndexes: undefined }
       }
@@ -564,18 +526,16 @@ export default function StepByStepTourMount({
   }
 
   const completeActiveGuide = () => {
-    if (!activeTask || !activeGuide)
-      return
+    if (!activeTask || !activeGuide) return
 
-    if (activeGuide.completionMode === 'external')
-      return
+    if (activeGuide.completionMode === 'external') return
 
     const guideAnalyticsProperties = activeGuideAnalyticsProperties
     if (guideAnalyticsProperties) {
-      trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.stepCtaClicked, {
-        ...workspaceProperties,
-        ...guideAnalyticsProperties,
-        cta_type: 'complete_guide',
+      trackStepByStepTourEvent({
+        action: 'guide_completed',
+        task_id: guideAnalyticsProperties.task_id,
+        guide_id: guideAnalyticsProperties.guide_id,
       })
     }
 
@@ -583,15 +543,8 @@ export default function StepByStepTourMount({
       const nextActiveGuide = getNextVisibleActiveGuideIndex(activeGuideIndex + 1)
 
       if (nextActiveGuide.activeGuideIndex === -1) {
-        if (guideAnalyticsProperties) {
-          trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.stepCompleted, {
-            ...workspaceProperties,
-            ...guideAnalyticsProperties,
-            next_guide_target: null,
-          })
-        }
         stepByStepTourActions.completeTask(activeTask.id, {
-          onSuccess: state => trackTaskCompleted(state, activeTask.id, 'walkthrough_finished'),
+          onSuccess: (state) => trackTaskCompleted(state, activeTask.id),
         })
         updateAccountState({
           ...accountState,
@@ -605,13 +558,6 @@ export default function StepByStepTourMount({
         return
       }
 
-      if (guideAnalyticsProperties) {
-        trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.stepCompleted, {
-          ...workspaceProperties,
-          ...guideAnalyticsProperties,
-          next_guide_target: activeGuides[nextActiveGuide.activeGuideIndex]?.target ?? null,
-        })
-      }
       updateAccountState({
         ...accountState,
         activeGuideIndex: nextActiveGuide.activeGuideIndex,
@@ -621,15 +567,8 @@ export default function StepByStepTourMount({
       return
     }
 
-    if (guideAnalyticsProperties) {
-      trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.stepCompleted, {
-        ...workspaceProperties,
-        ...guideAnalyticsProperties,
-        next_guide_target: null,
-      })
-    }
     stepByStepTourActions.completeTask(activeTask.id, {
-      onSuccess: state => trackTaskCompleted(state, activeTask.id, 'walkthrough_finished'),
+      onSuccess: (state) => trackTaskCompleted(state, activeTask.id),
     })
     updateAccountState({
       ...accountState,
@@ -644,7 +583,7 @@ export default function StepByStepTourMount({
 
   const dismissCompletedTour = () => {
     stepByStepTourActions.skipTour(currentWorkspaceId, {
-      onSuccess: state => trackTourSkipped(state, 'completion_prompt'),
+      onSuccess: trackTourSkipped,
     })
     updateAccountState({
       ...accountState,
@@ -660,31 +599,37 @@ export default function StepByStepTourMount({
   const floatingChecklist = (
     <FloatingChecklist
       title={title}
-      duration={t($ => $['stepByStepTour.duration'])}
+      duration={t(($) => $['stepByStepTour.duration'])}
       minimized={checklistMinimized}
       progress={{
-        ariaValueText: t($ => $['stepByStepTour.progressAriaValueText'], {
+        ariaValueText: t(($) => $['stepByStepTour.progressAriaValueText'], {
           completed: completedAvailableTaskIds.length,
           total: availableTasks.length,
         }),
         completed: completedAvailableTaskIds.length,
         total: availableTasks.length,
       }}
-      completionPrompt={completionPromptVisible
-        ? {
-            label: t($ => $['stepByStepTour.completion.label']),
-            title: t($ => $['stepByStepTour.completion.title']),
-            description: t($ => $['stepByStepTour.completion.description']),
-            dismissLabel: t($ => $['stepByStepTour.completion.dismiss']),
-            onDismiss: dismissCompletedTour,
-          }
-        : undefined}
+      completionPrompt={
+        completionPromptVisible
+          ? {
+              label: t(($) => $['stepByStepTour.completion.label']),
+              title: t(($) => $['stepByStepTour.completion.title']),
+              description: t(($) => $['stepByStepTour.completion.description']),
+              dismissLabel: t(($) => $['stepByStepTour.completion.dismiss']),
+              onDismiss: dismissCompletedTour,
+            }
+          : undefined
+      }
       tasks={tasks}
-      skipLabel={t($ => $['stepByStepTour.skip'])}
-      minimizeLabel={t($ => $['stepByStepTour.minimize'])}
-      restoreLabel={t($ => $['stepByStepTour.restore'])}
-      getTaskCompleteLabel={taskTitle => t($ => $['stepByStepTour.markTaskComplete'], { title: taskTitle })}
-      getTaskIncompleteLabel={taskTitle => t($ => $['stepByStepTour.markTaskIncomplete'], { title: taskTitle })}
+      skipLabel={t(($) => $['stepByStepTour.skip'])}
+      minimizeLabel={t(($) => $['stepByStepTour.minimize'])}
+      restoreLabel={t(($) => $['stepByStepTour.restore'])}
+      getTaskCompleteLabel={(taskTitle) =>
+        t(($) => $['stepByStepTour.markTaskComplete'], { title: taskTitle })
+      }
+      getTaskIncompleteLabel={(taskTitle) =>
+        t(($) => $['stepByStepTour.markTaskIncomplete'], { title: taskTitle })
+      }
       onMinimize={() => {
         updateAccountState({ ...accountState, minimized: true })
         setShellMode('collapsed')
@@ -696,37 +641,35 @@ export default function StepByStepTourMount({
       onSkip={skipTour}
       onCompleteTask={(taskId) => {
         const guides = getStepByStepTourGuides(taskId, accountState.activeGuideGroup)
-        const hasExternalCompletionGuide = guides.some(guide => getStepByStepTourGuideKind(guide) === 'action')
-        if (hasExternalCompletionGuide)
-          return
+        const hasExternalCompletionGuide = guides.some(
+          (guide) => getStepByStepTourGuideKind(guide) === 'action',
+        )
+        if (hasExternalCompletionGuide) return
 
         stepByStepTourActions.completeTask(taskId, {
-          onSuccess: state => trackTaskCompleted(state, taskId, 'manual'),
+          onSuccess: (state) => trackTaskCompleted(state, taskId),
         })
       }}
       onStartTask={(taskId) => {
-        const task = availableTasks.find(item => item.id === taskId)
+        const task = availableTasks.find((item) => item.id === taskId)
 
-        if (!task)
-          return
+        if (!task) return
 
-        const guideGroup = taskId === 'home'
-          ? homeGuideGroup
-          : taskId === 'integration'
-            ? integrationGuideGroup
-            : undefined
-        trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.taskCtaClicked, {
-          ...workspaceProperties,
+        const guideGroup =
+          taskId === 'home'
+            ? homeGuideGroup
+            : taskId === 'integration'
+              ? integrationGuideGroup
+              : undefined
+        trackStepByStepTourEvent({
+          action: 'task_started',
           task_id: taskId,
-          guide_group: guideGroup ?? null,
           permission_variant: getPermissionVariant(taskId),
-          task_index: getStepByStepTourTaskIndex(taskId, availableTasks),
-          task_status: getTaskStatus(taskId),
         })
 
         if (taskId === 'knowledge' && !hasKnowledgeWalkthroughPermissions) {
           stepByStepTourActions.completeTask(taskId, {
-            onSuccess: state => trackTaskCompleted(state, taskId, 'permission_fallback'),
+            onSuccess: (state) => trackTaskCompleted(state, taskId),
           })
           updateAccountState({
             ...accountState,
@@ -741,8 +684,9 @@ export default function StepByStepTourMount({
         }
 
         const guides = getStepByStepTourGuides(taskId, guideGroup)
-        const guideIndexes = createGuideIndexes(guides)
-          .filter(index => isGuideEligibleForPlan(guides[index]!, canSetPluginPreferences))
+        const guideIndexes = createGuideIndexes(guides).filter((index) =>
+          isGuideEligibleForPlan(guides[index]!, canSetPluginPreferences),
+        )
         updateAccountState({
           ...accountState,
           activeTaskId: taskId,
@@ -754,15 +698,14 @@ export default function StepByStepTourMount({
         router.push(task.route)
       }}
       onUncompleteTask={(taskId) => {
-        const completedTaskCountBefore = completedAvailableTaskIds.length
         stepByStepTourActions.uncompleteTask(taskId, {
           onSuccess: (state) => {
-            trackStepByStepTourEvent(STEP_BY_STEP_TOUR_ANALYTICS_EVENTS.taskUncompleted, {
-              ...workspaceProperties,
+            trackStepByStepTourEvent({
+              action: 'task_reopened',
               task_id: taskId,
-              completed_task_count_after: state.completedTaskIds.filter(completedTaskId => availableTaskIds.includes(completedTaskId)).length,
-              completed_task_count_before: completedTaskCountBefore,
-              source: 'checklist_status_control',
+              completed_task_count: state.completedTaskIds.filter((completedTaskId) =>
+                availableTaskIds.includes(completedTaskId),
+              ).length,
             })
           },
         })
@@ -780,27 +723,36 @@ export default function StepByStepTourMount({
         <StepByStepTourCoachmark
           guide={{
             ...activeGuide,
-            description: t($ => $[activeGuide.description]),
-            learnMoreHref: activeGuide.learnMoreDocPath ? docLink(activeGuide.learnMoreDocPath) : undefined,
-            learnMoreLabel: t($ => $[activeGuide.learnMoreLabel]),
-            primaryActionLabel: t($ => $[activeGuide.primaryActionLabel]),
-            title: t($ => $[activeGuide.title]),
+            description: t(($) => $[activeGuide.description]),
+            learnMoreHref: activeGuide.learnMoreDocPath
+              ? docLink(activeGuide.learnMoreDocPath)
+              : undefined,
+            learnMoreLabel: t(($) => $[activeGuide.learnMoreLabel]),
+            primaryActionLabel: t(($) => $[activeGuide.primaryActionLabel]),
+            title: t(($) => $[activeGuide.title]),
           }}
           targetElement={activeTargetElement}
           placement={activeGuidePlacement}
-          stepLabel={t($ => $['stepByStepTour.stepLabel'], {
+          stepLabel={t(($) => $['stepByStepTour.stepLabel'], {
             current: activeStepIndex + 1,
             total: activeStepTotal,
           })}
-          skipLabel={t($ => $['stepByStepTour.skip'])}
-          interactionPolicy={getStepByStepTourGuideInteractionPolicy(activeGuide, activeTask.canClickThrough)}
+          skipLabel={t(($) => $['stepByStepTour.skip'])}
+          interactionPolicy={getStepByStepTourGuideInteractionPolicy(
+            activeGuide,
+            activeTask.canClickThrough,
+          )}
           onSkip={skipActiveGuide}
           onComplete={completeActiveGuide}
         />
       )}
       {visible && (!allTasksCompleted || completionPromptVisible) && (
         <Popover open={overlayVisible && expanded}>
-          <div ref={anchorRef} aria-hidden="true" className="pointer-events-none absolute bottom-0 left-0 h-0 w-full" />
+          <div
+            ref={anchorRef}
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-0 left-0 h-0 w-full"
+          />
           {checklistMinimized && floatingChecklist}
           {overlayVisible && (
             <PopoverContent
@@ -824,9 +776,9 @@ export default function StepByStepTourMount({
       )}
       {skipRecoveryVisible && (
         <SkipRecoveryPrompt
-          label={t($ => $['stepByStepTour.skipRecovery.label'])}
-          message={t($ => $['stepByStepTour.skipRecovery.message'])}
-          dismissLabel={t($ => $['stepByStepTour.skipRecovery.dismiss'])}
+          label={t(($) => $['stepByStepTour.skipRecovery.label'])}
+          message={t(($) => $['stepByStepTour.skipRecovery.message'])}
+          dismissLabel={t(($) => $['stepByStepTour.skipRecovery.dismiss'])}
           onDismiss={() => setSkipRecoveryVisible(false)}
         />
       )}
@@ -858,12 +810,24 @@ function SkipRecoveryPrompt({
     >
       <p className="system-sm-regular text-text-secondary">{message}</p>
       <div className="flex h-12 items-end justify-end pt-4">
-        <Button ref={dismissRef} variant="primary" size="medium" className="w-20" onClick={onDismiss}>
+        <Button
+          ref={dismissRef}
+          variant="primary"
+          size="medium"
+          className="w-20"
+          onClick={onDismiss}
+        >
           {dismissLabel}
         </Button>
       </div>
-      <span aria-hidden className="absolute top-full left-[214px] h-7 w-0.5 bg-state-accent-hover-alt" />
-      <span aria-hidden className="absolute top-[calc(100%+22px)] left-[209px] size-3 rounded-full border-2 border-state-accent-hover bg-state-accent-solid shadow-xs" />
+      <span
+        aria-hidden
+        className="absolute top-full left-[214px] h-7 w-0.5 bg-state-accent-hover-alt"
+      />
+      <span
+        aria-hidden
+        className="absolute top-[calc(100%+22px)] left-[209px] size-3 rounded-full border-2 border-state-accent-hover bg-state-accent-solid shadow-xs"
+      />
     </section>
   )
 }

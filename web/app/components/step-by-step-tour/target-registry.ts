@@ -58,6 +58,7 @@ export type StepByStepTourGuideInteractionPolicy = 'blocked' | 'target-only'
 type StepByStepTourGuidePortalOrder = 'afterOverlays'
 
 export type StepByStepTourGuide = {
+  id: string
   taskId: StepByStepTourTaskId
   target: string
   title: StepByStepTourGuideCopyKey
@@ -96,6 +97,7 @@ export function getStepByStepTourGuideInteractionPolicy(
 const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 'studioEmpty' | 'studioWithApps' | 'studioNoCreateEmpty' | 'studioNoCreateWithApps'>, StepByStepTourGuide[]> = {
   studioEmpty: [
     {
+      id: 'studio.empty.template',
       taskId: 'studio',
       target: STEP_BY_STEP_TOUR_TARGETS.studioEmptyTemplate,
       title: 'stepByStepTour.guides.studio.empty.template.title',
@@ -104,6 +106,7 @@ const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 
       primaryActionLabel: 'stepByStepTour.guides.primaryActionLabel',
     },
     {
+      id: 'studio.empty.blank',
       taskId: 'studio',
       target: STEP_BY_STEP_TOUR_TARGETS.studioEmptyBlank,
       title: 'stepByStepTour.guides.studio.empty.blank.title',
@@ -112,6 +115,7 @@ const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 
       primaryActionLabel: 'stepByStepTour.guides.primaryActionLabel',
     },
     {
+      id: 'studio.empty.dsl',
       taskId: 'studio',
       target: STEP_BY_STEP_TOUR_TARGETS.studioEmptyDSL,
       title: 'stepByStepTour.guides.studio.empty.dsl.title',
@@ -120,6 +124,7 @@ const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 
       primaryActionLabel: 'stepByStepTour.guides.primaryActionLabel',
     },
     {
+      id: 'studio.empty.learn_dify',
       taskId: 'studio',
       target: STEP_BY_STEP_TOUR_TARGETS.studioEmptyLearnDify,
       title: 'stepByStepTour.guides.studio.empty.learnDify.title',
@@ -131,6 +136,7 @@ const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 
   ],
   studioWithApps: [
     {
+      id: 'studio.with_apps.create',
       taskId: 'studio',
       target: STEP_BY_STEP_TOUR_TARGETS.studioWithAppsCreate,
       title: 'stepByStepTour.guides.studio.withApps.create.title',
@@ -142,6 +148,7 @@ const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 
       ],
     },
     {
+      id: 'studio.with_apps.manage',
       taskId: 'studio',
       target: STEP_BY_STEP_TOUR_TARGETS.studioWithAppsFirstAppCard,
       title: 'stepByStepTour.guides.studio.withApps.manage.title',
@@ -156,6 +163,7 @@ const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 
   ],
   studioNoCreateEmpty: [
     {
+      id: 'studio.no_create.empty',
       taskId: 'studio',
       target: STEP_BY_STEP_TOUR_TARGETS.studioNoCreateEmpty,
       title: 'stepByStepTour.guides.studio.noCreate.empty.title',
@@ -166,6 +174,7 @@ const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 
   ],
   studioNoCreateWithApps: [
     {
+      id: 'studio.no_create.with_apps.manage',
       taskId: 'studio',
       target: STEP_BY_STEP_TOUR_TARGETS.studioNoCreateFirstAppCard,
       title: 'stepByStepTour.guides.studio.noCreate.withApps.title',
@@ -182,6 +191,7 @@ const STEP_BY_STEP_TOUR_STUDIO_GUIDES: Record<Extract<StepByStepTourGuideGroup, 
 const STEP_BY_STEP_TOUR_KNOWLEDGE_GUIDES: Record<Extract<StepByStepTourGuideGroup, 'knowledgeEmpty' | 'knowledgeWithDatasets'>, StepByStepTourGuide[]> = {
   knowledgeEmpty: [
     {
+      id: 'knowledge.empty.create',
       taskId: 'knowledge',
       target: STEP_BY_STEP_TOUR_TARGETS.knowledgeEmptyCreate,
       title: 'stepByStepTour.guides.knowledge.empty.create.title',
@@ -190,6 +200,7 @@ const STEP_BY_STEP_TOUR_KNOWLEDGE_GUIDES: Record<Extract<StepByStepTourGuideGrou
       primaryActionLabel: 'stepByStepTour.guides.primaryActionLabel',
     },
     {
+      id: 'knowledge.empty.pipeline',
       taskId: 'knowledge',
       target: STEP_BY_STEP_TOUR_TARGETS.knowledgeEmptyPipeline,
       title: 'stepByStepTour.guides.knowledge.empty.pipeline.title',
@@ -198,6 +209,7 @@ const STEP_BY_STEP_TOUR_KNOWLEDGE_GUIDES: Record<Extract<StepByStepTourGuideGrou
       primaryActionLabel: 'stepByStepTour.guides.primaryActionLabel',
     },
     {
+      id: 'knowledge.empty.connect',
       taskId: 'knowledge',
       target: STEP_BY_STEP_TOUR_TARGETS.knowledgeEmptyConnect,
       title: 'stepByStepTour.guides.knowledge.empty.connect.title',
@@ -208,6 +220,7 @@ const STEP_BY_STEP_TOUR_KNOWLEDGE_GUIDES: Record<Extract<StepByStepTourGuideGrou
   ],
   knowledgeWithDatasets: [
     {
+      id: 'knowledge.with_datasets.create',
       taskId: 'knowledge',
       target: STEP_BY_STEP_TOUR_TARGETS.knowledgeWithDatasetsCreate,
       title: 'stepByStepTour.guides.knowledge.withDatasets.create.title',
@@ -219,6 +232,7 @@ const STEP_BY_STEP_TOUR_KNOWLEDGE_GUIDES: Record<Extract<StepByStepTourGuideGrou
       ],
     },
     {
+      id: 'knowledge.with_datasets.manage',
       taskId: 'knowledge',
       target: STEP_BY_STEP_TOUR_TARGETS.knowledgeWithDatasetsFirstCard,
       title: 'stepByStepTour.guides.knowledge.withDatasets.manage.title',
@@ -236,6 +250,7 @@ const STEP_BY_STEP_TOUR_KNOWLEDGE_GUIDES: Record<Extract<StepByStepTourGuideGrou
 const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepTourGuide[]>> = {
   home: [
     {
+      id: 'home.open_lesson',
       taskId: 'home',
       target: STEP_BY_STEP_TOUR_TARGETS.home,
       title: 'stepByStepTour.tasks.home.title',
@@ -247,6 +262,7 @@ const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepT
       interactionPolicy: 'target-only',
     },
     {
+      id: 'home.create_app',
       taskId: 'home',
       target: STEP_BY_STEP_TOUR_TARGETS.homeTryAppCreate,
       title: 'stepByStepTour.tasks.home.title',
@@ -261,6 +277,7 @@ const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepT
   ],
   integration: [
     {
+      id: 'integration.model_provider',
       taskId: 'integration',
       target: STEP_BY_STEP_TOUR_TARGETS.integrationModelProviderNav,
       title: 'stepByStepTour.guides.integration.modelProvider.title',
@@ -270,6 +287,7 @@ const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepT
       integrationSection: 'provider',
     },
     {
+      id: 'integration.tool_plugin',
       taskId: 'integration',
       target: STEP_BY_STEP_TOUR_TARGETS.integrationToolPluginNav,
       title: 'stepByStepTour.guides.integration.toolPlugin.title',
@@ -279,6 +297,7 @@ const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepT
       integrationSection: 'builtin',
     },
     {
+      id: 'integration.mcp',
       taskId: 'integration',
       target: STEP_BY_STEP_TOUR_TARGETS.integrationMcpNav,
       title: 'stepByStepTour.guides.integration.mcp.title',
@@ -288,6 +307,7 @@ const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepT
       integrationSection: 'mcp',
     },
     {
+      id: 'integration.data_source',
       taskId: 'integration',
       target: STEP_BY_STEP_TOUR_TARGETS.integrationDataSourceNav,
       title: 'stepByStepTour.guides.integration.dataSource.title',
@@ -297,6 +317,7 @@ const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepT
       integrationSection: 'data-source',
     },
     {
+      id: 'integration.trigger',
       taskId: 'integration',
       target: STEP_BY_STEP_TOUR_TARGETS.integrationTriggerNav,
       title: 'stepByStepTour.guides.integration.trigger.title',
@@ -306,6 +327,7 @@ const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepT
       integrationSection: 'trigger',
     },
     {
+      id: 'integration.update_settings',
       taskId: 'integration',
       target: STEP_BY_STEP_TOUR_TARGETS.integrationUpdateSettings,
       title: 'stepByStepTour.guides.integration.updateSettings.title',
@@ -320,6 +342,7 @@ const STEP_BY_STEP_TOUR_GUIDES: Partial<Record<StepByStepTourTaskId, StepByStepT
 
 const STEP_BY_STEP_TOUR_HOME_NO_CREATE_GUIDES: StepByStepTourGuide[] = [
   {
+    id: 'home.no_create',
     taskId: 'home',
     target: STEP_BY_STEP_TOUR_TARGETS.home,
     title: 'stepByStepTour.guides.home.noCreate.title',
@@ -331,6 +354,7 @@ const STEP_BY_STEP_TOUR_HOME_NO_CREATE_GUIDES: StepByStepTourGuide[] = [
 
 const STEP_BY_STEP_TOUR_INTEGRATION_LIMITED_ACCESS_GUIDES: StepByStepTourGuide[] = [
   {
+    id: 'integration.limited_access.model_provider',
     taskId: 'integration',
     target: STEP_BY_STEP_TOUR_TARGETS.integrationModelProviderNav,
     title: 'stepByStepTour.guides.integration.modelProvider.title',
@@ -340,6 +364,7 @@ const STEP_BY_STEP_TOUR_INTEGRATION_LIMITED_ACCESS_GUIDES: StepByStepTourGuide[]
     integrationSection: 'provider',
   },
   {
+    id: 'integration.limited_access.tool_plugin',
     taskId: 'integration',
     target: STEP_BY_STEP_TOUR_TARGETS.integrationToolPluginNav,
     title: 'stepByStepTour.guides.integration.toolPlugin.title',
@@ -349,6 +374,7 @@ const STEP_BY_STEP_TOUR_INTEGRATION_LIMITED_ACCESS_GUIDES: StepByStepTourGuide[]
     integrationSection: 'builtin',
   },
   {
+    id: 'integration.limited_access.mcp',
     taskId: 'integration',
     target: STEP_BY_STEP_TOUR_TARGETS.integrationMcpNav,
     title: 'stepByStepTour.guides.integration.mcp.title',
@@ -358,6 +384,7 @@ const STEP_BY_STEP_TOUR_INTEGRATION_LIMITED_ACCESS_GUIDES: StepByStepTourGuide[]
     integrationSection: 'mcp',
   },
   {
+    id: 'integration.limited_access.data_source',
     taskId: 'integration',
     target: STEP_BY_STEP_TOUR_TARGETS.integrationDataSourceNav,
     title: 'stepByStepTour.guides.integration.dataSource.title',
@@ -367,6 +394,7 @@ const STEP_BY_STEP_TOUR_INTEGRATION_LIMITED_ACCESS_GUIDES: StepByStepTourGuide[]
     integrationSection: 'data-source',
   },
   {
+    id: 'integration.limited_access.trigger',
     taskId: 'integration',
     target: STEP_BY_STEP_TOUR_TARGETS.integrationTriggerNav,
     title: 'stepByStepTour.guides.integration.trigger.title',
