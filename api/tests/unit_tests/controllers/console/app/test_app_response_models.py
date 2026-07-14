@@ -680,7 +680,7 @@ def test_app_create_api_attaches_permission_keys(
     assert status == 201
     assert resp["permission_keys"] == ["app.acl.view_layout", "app.acl.edit"]
     assert replace_whitelist.call_args.kwargs["payload"].scope is app_module.RBACResourceWhitelistScope.ALL
-    initialize_rbac_task.delay.assert_called_once_with("tenant-1", "acct-1", "app-new")
+    initialize_rbac_task.delay.assert_called_once_with("tenant-1", "acct-1", app_id="app-new")
     orm_session.expire_all()
     persisted_app = orm_session.get(App, "app-new")
     assert persisted_app is not None

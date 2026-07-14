@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from inspect import unwrap
 from types import SimpleNamespace
-from unittest.mock import Mock, PropertyMock, patch
+from unittest.mock import PropertyMock, patch
 
 import pytest
 from flask import Flask
@@ -61,7 +61,7 @@ def _account() -> Account:
 
 
 class TestPipelineTemplateListApi:
-    def test_get_uses_query_defaults_and_serializes_nullable_fields(self, app: Flask) -> None:
+    def test_get_uses_query_defaults_and_serializes_nullable_fields(self, app: Flask, sqlite_engine: Engine) -> None:
         api = PipelineTemplateListApi()
         method = unwrap(api.get)
         tenant_id = "tenant-1"
@@ -73,10 +73,11 @@ class TestPipelineTemplateListApi:
             return {"pipeline_templates": [_template_item()]}
 
         with (
+            Session(sqlite_engine) as session,
             app.test_request_context("/rag/pipeline/templates"),
             patch.object(module.RagPipelineService, "get_pipeline_templates", side_effect=get_pipeline_templates),
         ):
-            response, status = method(api, Mock(), tenant_id)
+            response, status = method(api, session, tenant_id)
 
         assert status == 200
         assert service_calls == [("built-in", "en-US", tenant_id)]
@@ -90,7 +91,7 @@ class TestPipelineTemplateListApi:
             ]
         }
 
-    def test_get_passes_explicit_query_to_service(self, app: Flask) -> None:
+    def test_get_passes_explicit_query_to_service(self, app: Flask, sqlite_engine: Engine) -> None:
         api = PipelineTemplateListApi()
         method = unwrap(api.get)
         tenant_id = "tenant-1"
@@ -102,10 +103,11 @@ class TestPipelineTemplateListApi:
             return {"pipeline_templates": []}
 
         with (
+            Session(sqlite_engine) as session,
             app.test_request_context("/rag/pipeline/templates?type=customized&language=ja-JP"),
             patch.object(module.RagPipelineService, "get_pipeline_templates", side_effect=get_pipeline_templates),
         ):
-            response, status = method(api, Mock(), tenant_id)
+            response, status = method(api, session, tenant_id)
 
         assert status == 200
         assert response == {"pipeline_templates": []}
@@ -113,7 +115,7 @@ class TestPipelineTemplateListApi:
 
 
 class TestPipelineTemplateDetailApi:
-    def test_get_serializes_template_detail(self, app: Flask) -> None:
+    def test_get_serializes_template_detail(self, app: Flask, sqlite_engine: Engine) -> None:
         api = PipelineTemplateDetailApi()
         method = unwrap(api.get)
         service_calls: list[tuple[str, str]] = []
@@ -124,6 +126,7 @@ class TestPipelineTemplateDetailApi:
             return _template_detail()
 
         with (
+            Session(sqlite_engine) as session,
             app.test_request_context("/rag/pipeline/templates/template-1?type=customized"),
             patch.object(
                 module.RagPipelineService,
@@ -131,13 +134,13 @@ class TestPipelineTemplateDetailApi:
                 side_effect=get_pipeline_template_detail,
             ),
         ):
-            response, status = method(api, Mock(), "template-1")
+            response, status = method(api, session, "template-1")
 
         assert status == 200
         assert response == {**_template_detail(), "created_by": None}
         assert service_calls == [("template-1", "customized")]
 
-    def test_get_raises_not_found_without_custom_response_body(self, app: Flask) -> None:
+    def test_get_raises_not_found_without_custom_response_body(self, app: Flask, sqlite_engine: Engine) -> None:
         api = PipelineTemplateDetailApi()
         method = unwrap(api.get)
 
@@ -145,15 +148,16 @@ class TestPipelineTemplateDetailApi:
             del template_id, type, session
 
         with (
+            Session(sqlite_engine) as session,
             app.test_request_context("/rag/pipeline/templates/missing"),
             patch.object(
                 module.RagPipelineService,
                 "get_pipeline_template_detail",
                 side_effect=get_pipeline_template_detail,
             ),
+            pytest.raises(NotFound),
         ):
-            with pytest.raises(NotFound):
-                method(api, Mock(), "missing")
+            method(api, session, "missing")
 
 
 class TestCustomizedPipelineTemplateApi:

@@ -14,6 +14,7 @@ from sqlalchemy import Engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from models import TagBinding
+from models.agent import Agent, WorkflowAgentNodeBinding
 from models.base import TypeBase
 from models.model import UploadFile
 from models.snippet import CustomizedSnippet, SnippetType
@@ -55,6 +56,8 @@ def database(sqlite_engine: Engine) -> Iterator[Database]:
         WorkflowNodeExecutionModel,
         WorkflowRun,
         TagBinding,
+        Agent,
+        WorkflowAgentNodeBinding,
     )
     TypeBase.metadata.create_all(sqlite_engine, tables=[model.__table__ for model in models])
     maker = sessionmaker(bind=sqlite_engine, expire_on_commit=False)
@@ -394,6 +397,46 @@ def test_delete_snippet_removes_workflow_and_tag_rows(database: Database) -> Non
     assert database.session.get(CustomizedSnippet, snippet_id) is None
     assert database.session.get(Workflow, workflow_id) is None
     assert database.session.get(TagBinding, binding_id) is None
+
+
+def test_delete_snippet_archives_owned_agents_and_schedules_backing_app_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snippet = SimpleNamespace(id="snippet-1", tenant_id="tenant-1")
+    agent = SimpleNamespace(
+        backing_app_id="backing-app-1",
+        status="active",
+        archived_by=None,
+        archived_at=None,
+        updated_by="creator-1",
+        updated_at=None,
+    )
+    scalar_results = [
+        SimpleNamespace(all=Mock(return_value=[])),
+        SimpleNamespace(all=Mock(return_value=[agent])),
+    ]
+    session = SimpleNamespace(
+        execute=Mock(),
+        scalars=Mock(side_effect=scalar_results),
+        delete=Mock(),
+    )
+    listen = Mock()
+    monkeypatch.setattr("services.snippet_service.event.listen", listen)
+
+    result = SnippetService.delete_snippet(
+        session=session,
+        snippet=snippet,
+        account_id="account-1",
+    )
+
+    assert result is True
+    assert agent.status == "archived"
+    assert agent.archived_by == "account-1"
+    assert agent.archived_at is not None
+    assert agent.updated_by == "account-1"
+    executed_sql = "\n".join(str(call.args[0]) for call in session.execute.call_args_list)
+    assert "DELETE FROM apps" in executed_sql
+    listen.assert_called_once_with(session, "after_commit", listen.call_args.args[2], once=True)
 
 
 def test_delete_archived_workflow_run_files_uses_storage_boundary(

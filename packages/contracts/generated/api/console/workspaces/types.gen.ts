@@ -90,6 +90,7 @@ export type SnippetImportResponse = {
   imported_dsl_version: string
   snippet_id: string | null
   status: ImportStatus
+  warnings: Array<DslImportWarning>
 }
 
 export type UpdateSnippetPayload = {
@@ -180,6 +181,12 @@ export type MemberInviteResponse = {
   >
   result: 'success'
   tenant_id: string
+}
+
+export type MemberInviteErrorResponse = {
+  code: 'invalid_param' | 'invalid_role' | 'limit_exceeded'
+  message: string
+  status: 400
 }
 
 export type OwnerTransferCheckPayload = {
@@ -1086,6 +1093,15 @@ export type SnippetTagResponse = {
 export type SnippetType = 'group' | 'node'
 
 export type ImportStatus = 'completed' | 'completed-with-warnings' | 'failed' | 'pending'
+
+export type DslImportWarning = {
+  code: string
+  details?: {
+    [key: string]: unknown
+  }
+  message: string
+  path: string
+}
 
 export type PluginDependency = {
   current_identifier?: string | null
@@ -2903,6 +2919,13 @@ export type PostWorkspacesCurrentMembersInviteEmailData = {
   query?: never
   url: '/workspaces/current/members/invite-email'
 }
+
+export type PostWorkspacesCurrentMembersInviteEmailErrors = {
+  400: MemberInviteErrorResponse
+}
+
+export type PostWorkspacesCurrentMembersInviteEmailError =
+  PostWorkspacesCurrentMembersInviteEmailErrors[keyof PostWorkspacesCurrentMembersInviteEmailErrors]
 
 export type PostWorkspacesCurrentMembersInviteEmailResponses = {
   201: MemberInviteResponse

@@ -354,6 +354,7 @@ def test_patch_snippet_updates_and_commits(
 def test_delete_snippet_deletes_and_commits(
     app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session, sqlite_engine: Engine
 ):
+    user = _account()
     snippet = _customized_snippet()
     snippet_db.add(snippet)
     snippet_db.commit()
@@ -361,7 +362,8 @@ def test_delete_snippet_deletes_and_commits(
     commits: list[Session] = []
     service_sessions: list[Session] = []
 
-    def delete_snippet(*, session: Session, snippet: CustomizedSnippet) -> None:
+    def delete_snippet(*, session: Session, snippet: CustomizedSnippet, account_id: str) -> None:
+        assert account_id == user.id
         service_sessions.append(session)
         event.listen(session, "after_commit", commits.append)
         session.delete(snippet)
@@ -374,13 +376,14 @@ def test_delete_snippet_deletes_and_commits(
     handler = unwrap(api.delete)
 
     with app.test_request_context("/workspaces/current/customized-snippets/snippet-1", method="DELETE"):
-        response, status_code = handler(api, "tenant-1", snippet_id="snippet-1")
+        response, status_code = handler(api, "tenant-1", user, snippet_id="snippet-1")
 
     assert status_code == 204
     assert response == ""
     delete_mock.assert_called_once()
     assert isinstance(delete_mock.call_args.kwargs["session"], Session)
     assert delete_mock.call_args.kwargs["snippet"].id == "snippet-1"
+    assert delete_mock.call_args.kwargs["account_id"] == user.id
     assert commits == service_sessions
     with Session(sqlite_engine) as verification_session:
         assert verification_session.get(CustomizedSnippet, "snippet-1") is None
@@ -440,14 +443,14 @@ def test_import_snippet_returns_202_for_pending_confirmation(
         method="POST",
         json={"mode": "yaml-content", "yaml_content": "kind: snippet"},
     ):
-        response, status_code = handler(api, user)
+        response, status_code = handler(api, snippet_db, user)
 
     assert status_code == 202
     assert response["status"] == ImportStatus.PENDING.value
     import_snippet.assert_called_once()
     assert len(dsl_sessions) == 1
     assert isinstance(dsl_sessions[0], Session)
-    assert commits == dsl_sessions
+    assert commits == []
 
 
 def test_import_snippet_returns_400_for_failed_import(app: Flask, monkeypatch: pytest.MonkeyPatch, snippet_db: Session):
@@ -472,12 +475,12 @@ def test_import_snippet_returns_400_for_failed_import(app: Flask, monkeypatch: p
         method="POST",
         json={"mode": "yaml-content", "yaml_content": "kind: snippet"},
     ):
-        response, status_code = handler(api, user)
+        response, status_code = handler(api, snippet_db, user)
 
     assert status_code == 400
     assert response["error"] == "Invalid DSL"
     assert len(dsl_sessions) == 1
-    assert commits == dsl_sessions
+    assert commits == []
 
 
 def test_import_confirm_returns_200_for_completed_import(
@@ -503,13 +506,13 @@ def test_import_confirm_returns_200_for_completed_import(
         "/workspaces/current/customized-snippets/imports/import-1/confirm",
         method="POST",
     ):
-        response, status_code = handler(api, user, import_id="import-1")
+        response, status_code = handler(api, snippet_db, user, import_id="import-1")
 
     assert status_code == 200
     assert response["snippet_id"] == "snippet-1"
     confirm_import.assert_called_once_with(import_id="import-1", account=user)
     assert len(dsl_sessions) == 1
-    assert commits == dsl_sessions
+    assert commits == []
 
 
 def test_check_dependencies_raises_when_snippet_missing(app: Flask, monkeypatch: pytest.MonkeyPatch):

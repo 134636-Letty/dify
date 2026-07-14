@@ -14,6 +14,7 @@ from sqlalchemy import Engine, event, select
 from sqlalchemy.orm import Session
 
 from graphon.nodes import BuiltinNodeTypes
+from models.agent import WorkflowAgentNodeBinding
 from models.base import TypeBase
 from models.snippet import CustomizedSnippet, SnippetType
 from models.workflow import Workflow, WorkflowKind, WorkflowType
@@ -28,7 +29,10 @@ from services.snippet_dsl_service import (
 
 @pytest.fixture
 def orm_session(sqlite_engine: Engine) -> Iterator[Session]:
-    TypeBase.metadata.create_all(sqlite_engine, tables=[CustomizedSnippet.__table__, Workflow.__table__])
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[CustomizedSnippet.__table__, Workflow.__table__, WorkflowAgentNodeBinding.__table__],
+    )
     with Session(sqlite_engine, expire_on_commit=False) as session:
         yield session
 
@@ -94,7 +98,8 @@ def _raise_on_workflow_insert(engine: Engine) -> Iterator[None]:
     [
         ("not-a-version", ImportStatus.FAILED),
         ("999.0.0", ImportStatus.PENDING),
-        ("0.1.0", ImportStatus.COMPLETED),
+        ("0.2.0", ImportStatus.COMPLETED),
+        ("0.1.0", ImportStatus.COMPLETED_WITH_WARNINGS),
         ("0.0.9", ImportStatus.COMPLETED_WITH_WARNINGS),
     ],
 )
@@ -259,7 +264,7 @@ workflow:
   graph: {nodes: [], edges: []}
 """,
     )
-    assert result.status == ImportStatus.COMPLETED
+    assert result.status == ImportStatus.COMPLETED_WITH_WARNINGS
     persisted = orm_session.get(CustomizedSnippet, result.snippet_id)
     assert persisted is not None
     assert persisted.name == "Imported"
@@ -268,6 +273,27 @@ workflow:
         select(Workflow).where(Workflow.app_id == persisted.id, Workflow.version == Workflow.VERSION_DRAFT)
     )
     assert workflow is not None
+
+
+def test_import_rolls_back_when_workflow_insert_fails(
+    service: SnippetDslService, orm_session: Session, sqlite_engine: Engine
+) -> None:
+    with _raise_on_workflow_insert(sqlite_engine):
+        result = service.import_snippet(
+            account=_account(),
+            import_mode=ImportMode.YAML_CONTENT.value,
+            yaml_content="""
+version: 0.2.0
+kind: snippet
+snippet: {name: Broken}
+workflow: {graph: {nodes: [], edges: []}}
+""",
+        )
+
+    assert result.status == ImportStatus.FAILED
+    assert result.error == "forced workflow INSERT"
+    assert orm_session.scalar(select(CustomizedSnippet)) is None
+    assert orm_session.scalar(select(Workflow)) is None
 
 
 def test_confirm_import_handles_missing_invalid_and_creates_from_pending(
@@ -297,6 +323,33 @@ workflow: {graph: {nodes: [], edges: []}}
     assert result.status == ImportStatus.COMPLETED
     assert orm_session.get(CustomizedSnippet, result.snippet_id).name == "Override"
     delete.assert_called_once_with("snippet_import_info:import-1")
+
+
+def test_confirm_import_rolls_back_when_workflow_insert_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    service: SnippetDslService,
+    orm_session: Session,
+    sqlite_engine: Engine,
+) -> None:
+    pending = SnippetPendingData(
+        import_mode=ImportMode.YAML_CONTENT.value,
+        yaml_content="""
+version: 9.0.0
+kind: snippet
+snippet: {name: Broken}
+workflow: {graph: {nodes: [], edges: []}}
+""",
+        snippet_id=None,
+    )
+    monkeypatch.setattr("services.snippet_dsl_service.redis_client.get", Mock(return_value=pending.model_dump_json()))
+
+    with _raise_on_workflow_insert(sqlite_engine):
+        result = service.confirm_import(import_id="import-1", account=_account())
+
+    assert result.status == ImportStatus.FAILED
+    assert result.error == "forced workflow INSERT"
+    assert orm_session.scalar(select(CustomizedSnippet)) is None
+    assert orm_session.scalar(select(Workflow)) is None
 
 
 def test_check_dependencies_reads_real_draft_workflow(

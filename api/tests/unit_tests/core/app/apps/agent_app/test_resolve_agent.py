@@ -11,7 +11,15 @@ import core.app.apps.agent_app.app_generator as gen_mod
 from core.app.apps.agent_app.app_generator import AgentAppGenerator, AgentAppGeneratorError, AgentAppNotPublishedError
 from core.app.entities.app_invoke_entities import InvokeFrom
 from models.account import Account
-from models.agent import Agent, AgentConfigDraft, AgentConfigSnapshot, AgentScope, AgentSource, AgentStatus
+from models.agent import (
+    Agent,
+    AgentConfigDraft,
+    AgentConfigDraftType,
+    AgentConfigSnapshot,
+    AgentScope,
+    AgentSource,
+    AgentStatus,
+)
 from models.agent_config_entities import AgentSoulConfig
 from models.model import App, AppMode, IconType
 
@@ -35,7 +43,13 @@ class _DatabaseBinding:
         self.session = session
 
 
-def _agent(*, tenant_id: str, app_id: str | None = None, snapshot_id: str | None = None) -> Agent:
+def _agent(
+    *,
+    tenant_id: str,
+    app_id: str | None = None,
+    snapshot_id: str | None = None,
+    source: AgentSource = AgentSource.AGENT_APP,
+) -> Agent:
     return Agent(
         tenant_id=tenant_id,
         name=f"Agent {uuid4()}",
@@ -45,7 +59,7 @@ def _agent(*, tenant_id: str, app_id: str | None = None, snapshot_id: str | None
         icon=None,
         icon_background=None,
         scope=AgentScope.ROSTER,
-        source=AgentSource.AGENT_APP,
+        source=source,
         app_id=app_id,
         backing_app_id=None,
         workflow_id=None,
@@ -152,10 +166,15 @@ class TestResolveAgentById:
 @pytest.mark.parametrize("sqlite_session", [AGENT_MODELS], indirect=True)
 class TestResolveAgent:
     @staticmethod
-    def _persist_bound_agent(sqlite_session: Session, *, published: bool) -> tuple[App, Agent, AgentConfigSnapshot]:
+    def _persist_bound_agent(
+        sqlite_session: Session,
+        *,
+        published: bool,
+        source: AgentSource = AgentSource.AGENT_APP,
+    ) -> tuple[App, Agent, AgentConfigSnapshot]:
         tenant_id = str(uuid4())
         app = _app(tenant_id=tenant_id, app_id=str(uuid4()))
-        agent = _agent(tenant_id=tenant_id, app_id=app.id)
+        agent = _agent(tenant_id=tenant_id, app_id=app.id, source=source)
         sqlite_session.add(agent)
         sqlite_session.flush()
         snapshot = _snapshot(tenant_id=tenant_id, agent_id=agent.id)
@@ -199,6 +218,59 @@ class TestResolveAgent:
         assert agent is bound_agent
         assert config_id == snapshot.id
         assert config_version_kind == "snapshot"
+        assert soul.prompt.system_prompt == "You are Iris."
+
+    def test_unpublished_imported_agent_is_not_available_to_public_runtime(
+        self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
+    ) -> None:
+        app, _, _ = self._persist_bound_agent(
+            sqlite_session,
+            published=False,
+            source=AgentSource.IMPORTED,
+        )
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
+
+        with pytest.raises(AgentAppNotPublishedError, match="not been published"):
+            AgentAppGenerator()._resolve_agent(
+                app,
+                invoke_from=InvokeFrom.WEB_APP,
+                draft_type=None,
+                user=_user(),
+            )
+
+    def test_unpublished_imported_agent_remains_available_to_debugger(
+        self, monkeypatch: pytest.MonkeyPatch, sqlite_session: Session
+    ) -> None:
+        app, agent, snapshot = self._persist_bound_agent(
+            sqlite_session,
+            published=False,
+            source=AgentSource.IMPORTED,
+        )
+        draft = AgentConfigDraft(
+            tenant_id=agent.tenant_id,
+            agent_id=agent.id,
+            draft_type=AgentConfigDraftType.DRAFT,
+            account_id=None,
+            draft_owner_key="",
+            base_snapshot_id=snapshot.id,
+            config_snapshot=AgentSoulConfig.model_validate(_SOUL_DICT),
+            created_by=None,
+            updated_by=None,
+        )
+        sqlite_session.add(draft)
+        sqlite_session.commit()
+        monkeypatch.setattr(gen_mod, "db", _DatabaseBinding(sqlite_session))
+
+        resolved_agent, config_id, config_version_kind, soul = AgentAppGenerator()._resolve_agent(
+            app,
+            invoke_from=InvokeFrom.DEBUGGER,
+            draft_type=None,
+            user=_user(),
+        )
+
+        assert resolved_agent is agent
+        assert config_id == draft.id
+        assert config_version_kind == "draft"
         assert soul.prompt.system_prompt == "You are Iris."
 
     def test_agent_without_active_snapshot_raises_before_model_resolution(
