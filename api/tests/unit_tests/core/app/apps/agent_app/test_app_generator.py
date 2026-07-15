@@ -11,9 +11,15 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Iterator
+from dataclasses import dataclass
+from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from pytest_mock import MockerFixture
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from core.app.apps.agent_app.app_generator import (
     AgentAppGenerator,
@@ -23,7 +29,11 @@ from core.app.apps.exc import GenerateTaskStoppedError
 from core.app.entities.app_invoke_entities import AGENT_RUNTIME_EXIT_INTENT_ARG, InvokeFrom, UserFrom
 from core.workflow.file_reference import build_file_reference
 from models import Account
-from models.agent import AgentConfigDraftType
+from models.agent import AgentConfigDraft, AgentConfigDraftType
+from models.agent_config_entities import AgentSoulConfig
+from models.base import TypeBase
+from models.enums import ConversationFromSource
+from models.model import App, AppMode, Conversation, Message
 
 MODULE = "core.app.apps.agent_app.app_generator"
 
@@ -32,6 +42,75 @@ class DummyAccount:
     def __init__(self, user_id: str) -> None:
         self.id = user_id
         self.session_id = f"session-{user_id}"
+
+
+@dataclass(frozen=True)
+class _Database:
+    """Provide Flask-SQLAlchemy-compatible access backed by SQLite."""
+
+    engine: Engine
+    session: scoped_session[Session]
+
+
+@dataclass(frozen=True)
+class _Records:
+    app: App
+    conversation: Conversation
+    message: Message
+
+
+@pytest.fixture
+def database(sqlite_engine: Engine) -> Iterator[_Database]:
+    """Create only tables queried by the worker and resume paths."""
+
+    models = (App, Conversation, Message, AgentConfigDraft)
+    tables = [TypeBase.metadata.tables[model.__tablename__] for model in models]
+    TypeBase.metadata.create_all(sqlite_engine, tables=tables)
+    session_registry = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    try:
+        yield _Database(engine=sqlite_engine, session=session_registry)
+    finally:
+        session_registry.remove()
+
+
+def _persist_records(database: _Database, *, invoke_from: InvokeFrom = InvokeFrom.WEB_APP) -> _Records:
+    app = App(
+        id=str(uuid4()),
+        tenant_id=str(uuid4()),
+        name="Agent app",
+        description="",
+        mode=AppMode.AGENT,
+        icon_type=None,
+        icon="",
+        icon_background=None,
+        enable_site=True,
+        enable_api=True,
+    )
+    conversation = Conversation(
+        id=str(uuid4()),
+        app_id=app.id,
+        mode=AppMode.AGENT,
+        name="Conversation",
+        _inputs={},
+        invoke_from=invoke_from,
+        from_source=ConversationFromSource.API,
+    )
+    message = Message(
+        id=str(uuid4()),
+        app_id=app.id,
+        conversation_id=conversation.id,
+        _inputs={},
+        query="original question",
+        message={},
+        message_unit_price=Decimal(0),
+        answer="",
+        answer_unit_price=Decimal(0),
+        currency="USD",
+        from_source=ConversationFromSource.API,
+    )
+    database.session.add_all([app, conversation, message])
+    database.session.commit()
+    return _Records(app=app, conversation=conversation, message=message)
 
 
 @pytest.fixture
@@ -292,19 +371,18 @@ class TestGenerateWorker:
         self,
         generator: AgentAppGenerator,
         mocker: MockerFixture,
+        database: _Database,
         *,
         run_side_effect=None,
         handled=False,
         guard_query="query",
     ):
-        generator._get_conversation = mocker.MagicMock(return_value=mocker.MagicMock(id="conv"))
-        generator._get_message = mocker.MagicMock(return_value=mocker.MagicMock(id="msg"))
         generator._run_input_guards = mocker.MagicMock(return_value=(handled, guard_query))
         generator._resolve_agent_by_id = mocker.MagicMock(
             return_value=(mocker.MagicMock(), mocker.MagicMock(), mocker.MagicMock())
         )
-        mocker.patch(f"{MODULE}.db.session.get", return_value=mocker.MagicMock(id="app1"))
-        mocker.patch(f"{MODULE}.db.session.close")
+        mocker.patch(f"{MODULE}.db", new=database)
+        mocker.patch("core.app.apps.message_based_app_generator.db", new=database)
         mocker.patch(f"{MODULE}.DifyRunContext", return_value=mocker.MagicMock())
         mocker.patch(f"{MODULE}.build_dify_model_access", return_value=(mocker.MagicMock(), None))
         mocker.patch(f"{MODULE}.AgentAppRuntimeRequestBuilder", return_value=mocker.MagicMock())
@@ -322,6 +400,7 @@ class TestGenerateWorker:
         generator,
         mocker: MockerFixture,
         queue_manager,
+        records: _Records,
         *,
         is_resume=False,
         query="query",
@@ -340,40 +419,48 @@ class TestGenerateWorker:
                 model_conf=mocker.MagicMock(model="m"),
                 query=query,
                 prompt_file_mappings=prompt_file_mappings,
+                app_config=mocker.MagicMock(app_id=records.app.id, tenant_id=records.app.tenant_id),
+                user_id=str(uuid4()),
+                invoke_from=InvokeFrom.WEB_APP,
+                agent_config_version_kind="snapshot",
             ),
             queue_manager=queue_manager,
-            conversation_id="conv",
-            message_id="msg",
+            conversation_id=records.conversation.id,
+            message_id=records.message.id,
             user_from=UserFrom.END_USER,
             is_resume=is_resume,
         )
 
-    def test_happy_path_runs_backend(self, generator: AgentAppGenerator, mocker: MockerFixture):
-        runner = self._wire(generator, mocker)
+    def test_happy_path_runs_backend(self, generator: AgentAppGenerator, database: _Database, mocker: MockerFixture):
+        records = _persist_records(database)
+        runner = self._wire(generator, mocker, database)
         queue_manager = mocker.MagicMock()
-        self._call(generator, mocker, queue_manager)
+        self._call(generator, mocker, queue_manager, records)
         runner.run.assert_called_once()
         queue_manager.publish_error.assert_not_called()
 
-    def test_worker_passes_runtime_session_scope_to_runner(self, generator, mocker: MockerFixture):
-        runner = self._wire(generator, mocker)
+    def test_worker_passes_runtime_session_scope_to_runner(self, generator, database: _Database, mocker: MockerFixture):
+        records = _persist_records(database)
+        runner = self._wire(generator, mocker, database)
         queue_manager = mocker.MagicMock()
 
-        self._call(generator, mocker, queue_manager, runtime_session_snapshot_id=None)
+        self._call(generator, mocker, queue_manager, records, runtime_session_snapshot_id=None)
 
         assert runner.run.call_args.kwargs["agent_config_snapshot_id"] == "s"
         assert runner.run.call_args.kwargs["session_scope_snapshot_id"] is None
 
-    def test_worker_forwards_runtime_exit_intent_to_runner(self, generator, mocker: MockerFixture):
-        runner = self._wire(generator, mocker)
+    def test_worker_forwards_runtime_exit_intent_to_runner(self, generator, database: _Database, mocker: MockerFixture):
+        records = _persist_records(database)
+        runner = self._wire(generator, mocker, database)
         queue_manager = mocker.MagicMock()
 
-        self._call(generator, mocker, queue_manager, agent_runtime_exit_intent="delete")
+        self._call(generator, mocker, queue_manager, records, agent_runtime_exit_intent="delete")
 
         assert runner.run.call_args.kwargs["agent_runtime_exit_intent"] == "delete"
 
-    def test_worker_appends_prompt_files_to_backend_query(self, generator, mocker: MockerFixture):
-        runner = self._wire(generator, mocker, guard_query="你看得见这张图片吗")
+    def test_worker_appends_prompt_files_to_backend_query(self, generator, database: _Database, mocker: MockerFixture):
+        records = _persist_records(database)
+        runner = self._wire(generator, mocker, database, guard_query="你看得见这张图片吗")
         queue_manager = mocker.MagicMock()
         file_mappings = [
             {
@@ -404,6 +491,7 @@ class TestGenerateWorker:
             generator,
             mocker,
             queue_manager,
+            records,
             query="你看得见这张图片吗",
             prompt_file_mappings=file_mappings,
         )
@@ -415,36 +503,42 @@ class TestGenerateWorker:
             f"{json.dumps(expected_file_mappings, ensure_ascii=False, separators=(',', ':'))}"
         )
 
-    def test_input_guard_short_circuit_skips_backend(self, generator, mocker: MockerFixture):
-        runner = self._wire(generator, mocker, handled=True)
+    def test_input_guard_short_circuit_skips_backend(self, generator, database: _Database, mocker: MockerFixture):
+        records = _persist_records(database)
+        runner = self._wire(generator, mocker, database, handled=True)
         queue_manager = mocker.MagicMock()
-        self._call(generator, mocker, queue_manager)
+        self._call(generator, mocker, queue_manager, records)
         runner.run.assert_not_called()
 
-    def test_resume_skips_input_guards_and_consumes_reply(self, generator, mocker: MockerFixture):
+    def test_resume_skips_input_guards_and_consumes_reply(self, generator, database: _Database, mocker: MockerFixture):
         # ENG-638 (review): on resume the replayed query is NOT new end-user input.
         # Input guards must be skipped, even if moderation/annotation would match,
         # so the run continues and the human reply (deferred_tool_results) is used.
-        runner = self._wire(generator, mocker, handled=True)  # guards WOULD short-circuit
+        records = _persist_records(database)
+        runner = self._wire(generator, mocker, database, handled=True)  # guards WOULD short-circuit
         queue_manager = mocker.MagicMock()
 
-        self._call(generator, mocker, queue_manager, is_resume=True, query="the approved reply")
+        self._call(generator, mocker, queue_manager, records, is_resume=True, query="the approved reply")
 
         generator._run_input_guards.assert_not_called()
         runner.run.assert_called_once()
         # the replayed paused-turn query flows straight to the runner (snapshot match)
         assert runner.run.call_args.kwargs["query"] == "the approved reply"
 
-    def test_generate_task_stopped_is_swallowed(self, generator, mocker: MockerFixture):
-        self._wire(generator, mocker, run_side_effect=GenerateTaskStoppedError())
+    def test_generate_task_stopped_is_swallowed(self, generator, database: _Database, mocker: MockerFixture):
+        records = _persist_records(database)
+        self._wire(generator, mocker, database, run_side_effect=GenerateTaskStoppedError())
         queue_manager = mocker.MagicMock()
-        self._call(generator, mocker, queue_manager)
+        self._call(generator, mocker, queue_manager, records)
         queue_manager.publish_error.assert_not_called()
 
-    def test_unexpected_error_is_published(self, generator: AgentAppGenerator, mocker: MockerFixture):
-        self._wire(generator, mocker, run_side_effect=ValueError("boom"))
+    def test_unexpected_error_is_published(
+        self, generator: AgentAppGenerator, database: _Database, mocker: MockerFixture
+    ):
+        records = _persist_records(database)
+        self._wire(generator, mocker, database, run_side_effect=ValueError("boom"))
         queue_manager = mocker.MagicMock()
-        self._call(generator, mocker, queue_manager)
+        self._call(generator, mocker, queue_manager, records)
         assert queue_manager.publish_error.called
 
 
@@ -452,18 +546,17 @@ class TestResumeAfterFormSubmission:
     """ENG-638: a resume turn re-sends the paused turn's original query so the
     composition's user-prompt layer matches the suspended snapshot (never blank)."""
 
-    def _wire(self, generator, mocker: MockerFixture):
+    def _wire(self, generator, mocker: MockerFixture, database: _Database, records: _Records):
         generator._resolve_agent = mocker.MagicMock(
             return_value=(mocker.MagicMock(id="agent1"), "snap1", "draft", mocker.MagicMock())
         )
-        generator._init_generate_records = mocker.MagicMock(
-            return_value=(mocker.MagicMock(id="conv", mode="agent"), mocker.MagicMock(id="msg"))
-        )
+        generator._init_generate_records = mocker.MagicMock(return_value=(records.conversation, records.message))
         generator._handle_response = mocker.MagicMock(return_value=None)
         mocker.patch(
             f"{MODULE}.ConversationService.get_conversation",
-            return_value=mocker.MagicMock(id="conv", invoke_from=InvokeFrom.WEB_APP),
+            return_value=records.conversation,
         )
+        mocker.patch(f"{MODULE}.db", new=database)
         mocker.patch(f"{MODULE}.AgentAppConfigManager.get_app_config", return_value=mocker.MagicMock(variables=[]))
         mocker.patch(f"{MODULE}.ModelConfigConverter.convert", return_value=mocker.MagicMock())
         mocker.patch(f"{MODULE}.TraceQueueManager", return_value=mocker.MagicMock())
@@ -474,15 +567,14 @@ class TestResumeAfterFormSubmission:
             f"{MODULE}.AgentAppGenerateEntity", return_value=mocker.MagicMock(task_id="t", user_id="user")
         )
 
-    def test_resume_resends_paused_turn_query(self, generator, mocker: MockerFixture):
-        entity = self._wire(generator, mocker)
-        db_mock = mocker.patch(f"{MODULE}.db")
-        db_mock.session.scalar.return_value = mocker.MagicMock(query="original question")
+    def test_resume_resends_paused_turn_query(self, generator, database: _Database, mocker: MockerFixture):
+        records = _persist_records(database)
+        entity = self._wire(generator, mocker, database, records)
 
         generator.resume_after_form_submission(
-            app_model=mocker.MagicMock(id="app1", tenant_id="tenant", mode="agent"),
+            app_model=records.app,
             user=DummyAccount("user"),
-            conversation_id="conv",
+            conversation_id=records.conversation.id,
             invoke_from=InvokeFrom.WEB_APP,
         )
 
@@ -490,39 +582,56 @@ class TestResumeAfterFormSubmission:
         assert entity.call_args.kwargs["query"] == "original question"
         assert "agent_runtime_exit_intent" not in entity.call_args.kwargs
 
-    def test_resume_falls_back_to_placeholder_when_no_paused_message(self, generator, mocker: MockerFixture):
-        entity = self._wire(generator, mocker)
-        db_mock = mocker.patch(f"{MODULE}.db")
-        db_mock.session.scalar.return_value = None
+    def test_resume_falls_back_to_placeholder_when_no_paused_message(
+        self, generator, database: _Database, mocker: MockerFixture
+    ):
+        records = _persist_records(database)
+        database.session.delete(records.message)
+        database.session.commit()
+        entity = self._wire(generator, mocker, database, records)
 
         generator.resume_after_form_submission(
-            app_model=mocker.MagicMock(id="app1", tenant_id="tenant", mode="agent"),
+            app_model=records.app,
             user=DummyAccount("user"),
-            conversation_id="conv",
+            conversation_id=records.conversation.id,
             invoke_from=InvokeFrom.WEB_APP,
         )
 
         # No prior user message -> a non-blank placeholder, still never blank.
         assert entity.call_args.kwargs["query"] == "(resumed)"
 
-    def test_resume_uses_build_draft_for_debugger_conversation(self, generator, mocker: MockerFixture):
-        self._wire(generator, mocker)
-        conversation = mocker.MagicMock(id="conv", invoke_from=InvokeFrom.DEBUGGER)
-        mocker.patch(f"{MODULE}.ConversationService.get_conversation", return_value=conversation)
+    def test_resume_uses_build_draft_for_debugger_conversation(
+        self, generator, database: _Database, mocker: MockerFixture
+    ):
+        records = _persist_records(database, invoke_from=InvokeFrom.DEBUGGER)
+        self._wire(generator, mocker, database, records)
         session_store = mocker.patch(f"{MODULE}.AgentAppRuntimeSessionStore")
+        draft_id = str(uuid4())
         session_store.return_value.load_active_session_for_conversation.return_value = mocker.MagicMock(
-            scope=mocker.MagicMock(agent_config_snapshot_id="draft-build-1")
+            scope=mocker.MagicMock(agent_config_snapshot_id=draft_id)
         )
-        draft_row = mocker.MagicMock(draft_type=AgentConfigDraftType.DEBUG_BUILD, account_id="user")
-        db_mock = mocker.patch(f"{MODULE}.db")
-        db_mock.session.scalar.side_effect = [draft_row, mocker.MagicMock(query="original question")]
+        account_id = str(uuid4())
+        draft_row = AgentConfigDraft(
+            id=draft_id,
+            tenant_id=records.app.tenant_id,
+            agent_id=str(uuid4()),
+            draft_type=AgentConfigDraftType.DEBUG_BUILD,
+            account_id=account_id,
+            draft_owner_key=account_id,
+            base_snapshot_id=None,
+            config_snapshot=AgentSoulConfig(),
+            created_by=account_id,
+            updated_by=account_id,
+        )
+        database.session.add(draft_row)
+        database.session.commit()
         account_user = mocker.MagicMock(spec=Account)
-        account_user.id = "user"
+        account_user.id = account_id
 
         generator.resume_after_form_submission(
-            app_model=mocker.MagicMock(id="app1", tenant_id="tenant", mode="agent"),
+            app_model=records.app,
             user=account_user,
-            conversation_id="conv",
+            conversation_id=records.conversation.id,
             invoke_from=InvokeFrom.DEBUGGER,
         )
 

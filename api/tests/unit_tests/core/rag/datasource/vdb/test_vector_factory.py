@@ -1,12 +1,47 @@
 import base64
 import sys
 import types
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session
 
 from core.rag.models.document import Document
+from models.base import TypeBase
+from models.dataset import Whitelist
+from models.enums import CreatorUserRole
+from models.model import StorageType, UploadFile
+
+
+@pytest.fixture
+def db_session(sqlite_engine: Engine) -> Iterator[Session]:
+    """Provide real whitelist and upload-file persistence for vector DB lookups."""
+
+    TypeBase.metadata.create_all(sqlite_engine, tables=[Whitelist.__table__, UploadFile.__table__])
+    with Session(sqlite_engine, expire_on_commit=False) as session:
+        yield session
+
+
+def _upload_file(*, file_id: str, key: str) -> UploadFile:
+    upload_file = UploadFile(
+        tenant_id="tenant-1",
+        storage_type=StorageType.LOCAL,
+        key=key,
+        name=f"{file_id}.png",
+        size=3,
+        extension="png",
+        mime_type="image/png",
+        created_by_role=CreatorUserRole.ACCOUNT,
+        created_by="account-1",
+        created_at=datetime.now(UTC).replace(tzinfo=None),
+        used=False,
+    )
+    upload_file.id = file_id
+    return upload_file
 
 
 def _register_fake_factory_module(monkeypatch: pytest.MonkeyPatch, module_path: str, class_name: str):
@@ -244,24 +279,18 @@ def test_init_vector_prefers_dataset_index_struct(vector_factory_module, monkeyp
     assert calls["init_args"] == (vector._dataset, ["doc_id"], "embeddings")
 
 
-def test_init_vector_uses_whitelist_override(vector_factory_module, monkeypatch: pytest.MonkeyPatch):
-    class _Expr:
-        def __eq__(self, _other):
-            return "expr"
-
+def test_init_vector_uses_whitelist_override(
+    vector_factory_module, monkeypatch: pytest.MonkeyPatch, db_session: Session
+):
     calls = {"vector_type": None}
 
     class _Factory:
         def init_vector(self, dataset, attributes, embeddings):
             return "vector-processor"
 
-    monkeypatch.setattr(vector_factory_module, "Whitelist", SimpleNamespace(tenant_id=_Expr(), category=_Expr()))
-    monkeypatch.setattr(vector_factory_module, "select", lambda _model: SimpleNamespace(where=lambda *_args: "stmt"))
-    monkeypatch.setattr(
-        vector_factory_module,
-        "db",
-        SimpleNamespace(session=SimpleNamespace(scalars=lambda _stmt: SimpleNamespace(one_or_none=lambda: object()))),
-    )
+    db_session.add(Whitelist(tenant_id="tenant-1", category="vector_db"))
+    db_session.commit()
+    monkeypatch.setattr(vector_factory_module, "db", SimpleNamespace(session=db_session))
     monkeypatch.setattr(vector_factory_module.dify_config, "VECTOR_STORE", vector_factory_module.VectorType.CHROMA)
     monkeypatch.setattr(vector_factory_module.dify_config, "VECTOR_STORE_WHITELIST_ENABLE", True)
     monkeypatch.setattr(
@@ -345,30 +374,17 @@ def test_create_skips_empty_text_documents_before_embedding(vector_factory_modul
     vector._vector_processor.create.assert_not_called()
 
 
-def test_create_multimodal_filters_missing_uploads(vector_factory_module, monkeypatch: pytest.MonkeyPatch):
-    class _Field:
-        def in_(self, value):
-            return value
-
-        def __eq__(self, value):
-            return value
-
+def test_create_multimodal_filters_missing_uploads(
+    vector_factory_module, monkeypatch: pytest.MonkeyPatch, db_session: Session
+):
     vector = vector_factory_module.Vector.__new__(vector_factory_module.Vector)
     vector._embeddings = MagicMock()
     vector._embeddings.embed_multimodal_documents.return_value = [[0.1, 0.2]]
     vector._vector_processor = MagicMock()
 
-    monkeypatch.setattr(vector_factory_module, "UploadFile", SimpleNamespace(id=_Field()))
-    monkeypatch.setattr(vector_factory_module, "select", lambda _model: SimpleNamespace(where=lambda *_args: "stmt"))
-    monkeypatch.setattr(
-        vector_factory_module,
-        "db",
-        SimpleNamespace(
-            session=SimpleNamespace(
-                scalars=lambda _stmt: SimpleNamespace(all=lambda: [SimpleNamespace(id="f-1", key="k-1")])
-            )
-        ),
-    )
+    db_session.add(_upload_file(file_id="f-1", key="k-1"))
+    db_session.commit()
+    monkeypatch.setattr(vector_factory_module, "db", SimpleNamespace(session=db_session))
     monkeypatch.setattr(vector_factory_module.storage, "load_once", MagicMock(return_value=b"abc"))
 
     docs = [
@@ -486,17 +502,19 @@ def test_vector_delegation_methods(vector_factory_module):
     vector._vector_processor.delete_by_metadata_field.assert_called_once_with("doc_id", "doc-1")
 
 
-def test_search_by_file_handles_missing_and_existing_upload(vector_factory_module, monkeypatch: pytest.MonkeyPatch):
+def test_search_by_file_handles_missing_and_existing_upload(
+    vector_factory_module, monkeypatch: pytest.MonkeyPatch, db_session: Session
+):
     vector = vector_factory_module.Vector.__new__(vector_factory_module.Vector)
     vector._embeddings = MagicMock()
     vector._vector_processor = MagicMock()
 
-    mock_session = SimpleNamespace(get=lambda _model, _id: None)
-    monkeypatch.setattr(vector_factory_module, "db", SimpleNamespace(session=mock_session))
+    monkeypatch.setattr(vector_factory_module, "db", SimpleNamespace(session=db_session))
 
     assert vector.search_by_file("file-1") == []
 
-    mock_session.get = lambda _model, _id: SimpleNamespace(key="blob-key")
+    db_session.add(_upload_file(file_id="file-2", key="blob-key"))
+    db_session.commit()
     monkeypatch.setattr(vector_factory_module.storage, "load_once", MagicMock(return_value=b"file-bytes"))
     vector._embeddings.embed_multimodal_query.return_value = [0.3, 0.4]
     vector._vector_processor.search_by_vector.return_value = ["hit"]

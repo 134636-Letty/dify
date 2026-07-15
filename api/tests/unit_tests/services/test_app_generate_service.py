@@ -16,16 +16,22 @@ Covers:
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
 from pytest_mock import MockerFixture
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, sessionmaker
 
 import services.app_generate_service as ags_module
+import services.workflow_service as workflow_service_module
 from core.app.entities.app_invoke_entities import InvokeFrom
 from enums.quota_type import QuotaType
-from models.model import AppMode
+from models.model import App, AppMode, IconType
+from models.workflow import Workflow, WorkflowType
 from services.app_generate_service import AppGenerateService
 from services.errors.app import WorkflowIdFormatError, WorkflowNotFoundError
 
@@ -33,6 +39,21 @@ from services.errors.app import WorkflowIdFormatError, WorkflowNotFoundError
 # ---------------------------------------------------------------------------
 # Helpers / Fakes
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _EngineDatabase:
+    engine: Engine
+
+
+@pytest.fixture
+def app_generate_session(sqlite_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[Session]:
+    """Yield a caller-owned real session with the app/workflow tables."""
+    App.metadata.create_all(sqlite_engine, tables=[App.__table__, Workflow.__table__])
+    monkeypatch.setattr(workflow_service_module, "db", _EngineDatabase(engine=sqlite_engine))
+    session_maker = sessionmaker(bind=sqlite_engine, expire_on_commit=False)
+    with session_maker() as session:
+        yield session
+
+
 class _DummyRateLimit:
     """Minimal stand-in for RateLimit that never touches Redis."""
 
@@ -82,6 +103,61 @@ def _make_workflow(*, workflow_id: str = "workflow-id", created_by: str = "owner
     workflow = MagicMock()
     workflow.id = workflow_id
     workflow.created_by = created_by
+    return workflow
+
+
+def _persist_app(
+    session: Session,
+    *,
+    app_id: str = "app-id",
+    tenant_id: str = "tenant-id",
+    workflow_id: str | None = None,
+) -> App:
+    app = App(
+        id=app_id,
+        tenant_id=tenant_id,
+        name="App",
+        description="",
+        mode=AppMode.WORKFLOW,
+        icon_type=IconType.EMOJI,
+        icon="app",
+        icon_background="#ffffff",
+        enable_site=True,
+        enable_api=True,
+        max_active_requests=0,
+        created_by="owner-id",
+        workflow_id=workflow_id,
+    )
+    session.add(app)
+    session.commit()
+    return app
+
+
+def _persist_workflow(
+    session: Session,
+    *,
+    app_id: str = "app-id",
+    tenant_id: str = "tenant-id",
+    workflow_id: str | None = None,
+    version: str = Workflow.VERSION_DRAFT,
+    created_by: str = "owner-id",
+) -> Workflow:
+    workflow = Workflow.new(
+        tenant_id=tenant_id,
+        app_id=app_id,
+        type=WorkflowType.WORKFLOW.value,
+        version=version,
+        graph="{}",
+        features="{}",
+        created_by=created_by,
+        environment_variables=[],
+        conversation_variables=[],
+        rag_pipeline_variables=[],
+    )
+    if workflow_id is not None:
+        workflow.id = workflow_id
+    session.add(workflow)
+    session.commit()
     return workflow
 
 
@@ -225,7 +301,7 @@ class TestGenerate:
         )
 
     # -- COMPLETION ---------------------------------------------------------
-    def test_completion_mode(self, mocker: MockerFixture):
+    def test_completion_mode(self, mocker: MockerFixture, app_generate_session: Session):
         gen_spy = mocker.patch(
             "services.app_generate_service.CompletionAppGenerator.generate",
             return_value={"result": "ok"},
@@ -240,13 +316,13 @@ class TestGenerate:
             args={"inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=False,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         assert result == {"result": "ok"}
         gen_spy.assert_called_once()
 
     # -- AGENT_CHAT via mode ------------------------------------------------
-    def test_agent_chat_mode(self, mocker: MockerFixture):
+    def test_agent_chat_mode(self, mocker: MockerFixture, app_generate_session: Session):
         gen_spy = mocker.patch(
             "services.app_generate_service.AgentChatAppGenerator.generate",
             return_value={"result": "agent"},
@@ -261,13 +337,13 @@ class TestGenerate:
             args={"inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=False,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         assert result == {"result": "agent"}
         gen_spy.assert_called_once()
 
     # -- AGENT_CHAT via is_agent flag (non-AGENT_CHAT mode) -----------------
-    def test_agent_via_is_agent_flag(self, mocker: MockerFixture):
+    def test_agent_via_is_agent_flag(self, mocker: MockerFixture, app_generate_session: Session):
         gen_spy = mocker.patch(
             "services.app_generate_service.AgentChatAppGenerator.generate",
             return_value={"result": "agent-via-flag"},
@@ -283,13 +359,13 @@ class TestGenerate:
             args={"inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=False,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         assert result == {"result": "agent-via-flag"}
         gen_spy.assert_called_once()
 
     # -- CHAT ---------------------------------------------------------------
-    def test_chat_mode(self, mocker: MockerFixture):
+    def test_chat_mode(self, mocker: MockerFixture, app_generate_session: Session):
         gen_spy = mocker.patch(
             "services.app_generate_service.ChatAppGenerator.generate",
             return_value={"result": "chat"},
@@ -305,13 +381,13 @@ class TestGenerate:
             args={"inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=False,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         assert result == {"result": "chat"}
         gen_spy.assert_called_once()
 
     # -- ADVANCED_CHAT blocking ---------------------------------------------
-    def test_advanced_chat_blocking(self, mocker: MockerFixture):
+    def test_advanced_chat_blocking(self, mocker: MockerFixture, app_generate_session: Session):
         workflow = _make_workflow()
         mocker.patch.object(AppGenerateService, "_get_workflow", return_value=workflow)
 
@@ -331,7 +407,7 @@ class TestGenerate:
             args={"workflow_id": None, "query": "hi", "inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=False,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         assert result == {"result": "advanced-blocking"}
         call_kwargs = gen_spy.call_args.kwargs
@@ -339,7 +415,9 @@ class TestGenerate:
         retrieve_spy.assert_not_called()
 
     # -- ADVANCED_CHAT streaming --------------------------------------------
-    def test_advanced_chat_streaming(self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_advanced_chat_streaming(
+        self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch, app_generate_session: Session
+    ):
         workflow = _make_workflow()
         mocker.patch.object(AppGenerateService, "_get_workflow", return_value=workflow)
         mocker.patch(
@@ -364,7 +442,7 @@ class TestGenerate:
             args={"workflow_id": None, "query": "hi", "inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=True,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         # In streaming mode it should go through retrieve_events, not generate
         gen_instance.retrieve_events.assert_called_once()
@@ -372,7 +450,7 @@ class TestGenerate:
         delay_spy.assert_called_once()
 
     # -- WORKFLOW blocking --------------------------------------------------
-    def test_workflow_blocking(self, mocker: MockerFixture):
+    def test_workflow_blocking(self, mocker: MockerFixture, app_generate_session: Session):
         workflow = _make_workflow()
         mocker.patch.object(AppGenerateService, "_get_workflow", return_value=workflow)
         gen_spy = mocker.patch(
@@ -390,7 +468,7 @@ class TestGenerate:
             args={"inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=False,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         assert result == {"result": "workflow-blocking"}
         call_kwargs = gen_spy.call_args.kwargs
@@ -398,7 +476,9 @@ class TestGenerate:
         assert call_kwargs["pause_state_config"].state_owner_user_id == "owner-id"
 
     # -- WORKFLOW streaming -------------------------------------------------
-    def test_workflow_streaming(self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_workflow_streaming(
+        self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch, app_generate_session: Session
+    ):
         workflow = _make_workflow()
         mocker.patch.object(AppGenerateService, "_get_workflow", return_value=workflow)
         mocker.patch(
@@ -424,14 +504,14 @@ class TestGenerate:
             args={"inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=True,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         retrieve_spy.assert_called_once()
         # The inner on_subscribe closure was invoked by _build_streaming_task_on_subscribe
         delay_spy.assert_called_once()
 
     # -- Invalid mode -------------------------------------------------------
-    def test_invalid_mode_raises(self, mocker: MockerFixture):
+    def test_invalid_mode_raises(self, mocker: MockerFixture, app_generate_session: Session):
         app = _make_app("invalid-mode", is_agent=False)
         with pytest.raises(ValueError, match="Invalid app mode"):
             AppGenerateService.generate(
@@ -440,7 +520,7 @@ class TestGenerate:
                 args={},
                 invoke_from=InvokeFrom.SERVICE_API,
                 streaming=False,
-                session=MagicMock(),
+                session=app_generate_session,
             )
 
 
@@ -456,7 +536,9 @@ class TestGenerateBilling:
             _noop_rate_limit_context,
         )
 
-    def test_billing_enabled_consumes_quota(self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_billing_enabled_consumes_quota(
+        self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch, app_generate_session: Session
+    ):
         monkeypatch.setattr(ags_module.dify_config, "BILLING_ENABLED", True)
         quota_charge = MagicMock()
         reserve_mock = mocker.patch(
@@ -478,13 +560,16 @@ class TestGenerateBilling:
             args={"inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=False,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         reserve_mock.assert_called_once_with(QuotaType.WORKFLOW, "tenant-id")
         quota_charge.commit.assert_called_once()
 
     def test_billing_quota_exceeded_raises_rate_limit_error(
-        self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
+        self,
+        mocker: MockerFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        app_generate_session: Session,
     ):
         from services.errors.app import QuotaExceededError
         from services.errors.llm import InvokeRateLimitError
@@ -502,10 +587,12 @@ class TestGenerateBilling:
                 args={"inputs": {}},
                 invoke_from=InvokeFrom.SERVICE_API,
                 streaming=False,
-                session=MagicMock(),
+                session=app_generate_session,
             )
 
-    def test_exception_refunds_quota_and_exits_rate_limit(self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_exception_refunds_quota_and_exits_rate_limit(
+        self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch, app_generate_session: Session
+    ):
         monkeypatch.setattr(ags_module.dify_config, "BILLING_ENABLED", True)
         quota_charge = MagicMock()
         mocker.patch(
@@ -528,12 +615,15 @@ class TestGenerateBilling:
                 args={"inputs": {}},
                 invoke_from=InvokeFrom.SERVICE_API,
                 streaming=False,
-                session=MagicMock(),
+                session=app_generate_session,
             )
         quota_charge.refund.assert_called_once()
 
     def test_rate_limit_exit_called_in_finally_for_blocking(
-        self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
+        self,
+        mocker: MockerFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        app_generate_session: Session,
     ):
         """For non-streaming (blocking) calls, rate_limit.exit should be called in finally."""
         monkeypatch.setattr(ags_module.dify_config, "BILLING_ENABLED", False)
@@ -560,12 +650,14 @@ class TestGenerateBilling:
             args={"inputs": {}},
             invoke_from=InvokeFrom.SERVICE_API,
             streaming=False,
-            session=MagicMock(),
+            session=app_generate_session,
         )
         # exit is called in finally block for non-streaming
         assert exit_calls == ["dummy-request-id"]
 
-    def test_blocking_failure_exits_rate_limit_once(self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_blocking_failure_exits_rate_limit_once(
+        self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch, app_generate_session: Session
+    ):
         monkeypatch.setattr(ags_module.dify_config, "BILLING_ENABLED", True)
         quota_charge = MagicMock()
         mocker.patch(
@@ -591,13 +683,15 @@ class TestGenerateBilling:
                 args={"inputs": {}},
                 invoke_from=InvokeFrom.SERVICE_API,
                 streaming=False,
-                session=MagicMock(),
+                session=app_generate_session,
             )
 
         quota_charge.refund.assert_called_once()
         assert exit_calls == ["dummy-request-id"]
 
-    def test_streaming_failure_exits_rate_limit_once(self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_streaming_failure_exits_rate_limit_once(
+        self, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch, app_generate_session: Session
+    ):
         monkeypatch.setattr(ags_module.dify_config, "BILLING_ENABLED", True)
         quota_charge = MagicMock()
         mocker.patch(
@@ -623,7 +717,7 @@ class TestGenerateBilling:
                 args={"inputs": {}},
                 invoke_from=InvokeFrom.SERVICE_API,
                 streaming=True,
-                session=MagicMock(),
+                session=app_generate_session,
             )
 
         quota_charge.refund.assert_called_once()
@@ -634,84 +728,85 @@ class TestGenerateBilling:
 # _get_workflow
 # ---------------------------------------------------------------------------
 class TestGetWorkflow:
-    def test_debugger_fetches_draft(self, mocker: MockerFixture):
-        draft_wf = _make_workflow()
-        ws = MagicMock()
-        ws.get_draft_workflow.return_value = draft_wf
-        mocker.patch("services.app_generate_service.WorkflowService", return_value=ws)
+    def test_debugger_fetches_tenant_scoped_draft(self, app_generate_session: Session) -> None:
+        app = _persist_app(app_generate_session)
+        draft = _persist_workflow(app_generate_session)
+        _persist_workflow(
+            app_generate_session,
+            app_id="other-app",
+            tenant_id="other-tenant",
+            version=Workflow.VERSION_DRAFT,
+        )
 
-        result = AppGenerateService._get_workflow(_make_app(AppMode.WORKFLOW), InvokeFrom.DEBUGGER, session=MagicMock())
-        assert result is draft_wf
-        ws.get_draft_workflow.assert_called_once()
+        result = AppGenerateService._get_workflow(app, InvokeFrom.DEBUGGER, session=app_generate_session)
 
-    def test_debugger_raises_when_no_draft(self, mocker: MockerFixture):
-        ws = MagicMock()
-        ws.get_draft_workflow.return_value = None
-        mocker.patch("services.app_generate_service.WorkflowService", return_value=ws)
+        assert result.id == draft.id
+        assert result.tenant_id == "tenant-id"
+
+    def test_debugger_raises_when_no_scoped_draft(self, app_generate_session: Session) -> None:
+        app = _persist_app(app_generate_session)
+        _persist_workflow(app_generate_session, app_id="other-app", tenant_id="other-tenant")
 
         with pytest.raises(ValueError, match="Workflow not initialized"):
-            AppGenerateService._get_workflow(_make_app(AppMode.WORKFLOW), InvokeFrom.DEBUGGER, session=MagicMock())
+            AppGenerateService._get_workflow(app, InvokeFrom.DEBUGGER, session=app_generate_session)
 
-    def test_non_debugger_fetches_published(self, mocker: MockerFixture):
-        pub_wf = _make_workflow()
-        ws = MagicMock()
-        ws.get_published_workflow.return_value = pub_wf
-        mocker.patch("services.app_generate_service.WorkflowService", return_value=ws)
+    def test_non_debugger_fetches_published_workflow(self, app_generate_session: Session) -> None:
+        workflow_id = str(uuid.uuid4())
+        published = _persist_workflow(app_generate_session, workflow_id=workflow_id, version="1")
+        app = _persist_app(app_generate_session, workflow_id=workflow_id)
 
-        result = AppGenerateService._get_workflow(
-            _make_app(AppMode.WORKFLOW), InvokeFrom.SERVICE_API, session=MagicMock()
-        )
-        assert result is pub_wf
-        ws.get_published_workflow.assert_called_once()
+        result = AppGenerateService._get_workflow(app, InvokeFrom.SERVICE_API, session=app_generate_session)
 
-    def test_non_debugger_raises_when_no_published(self, mocker: MockerFixture):
-        ws = MagicMock()
-        ws.get_published_workflow.return_value = None
-        mocker.patch("services.app_generate_service.WorkflowService", return_value=ws)
+        assert result.id == published.id
+        assert result.version == "1"
+
+    def test_non_debugger_raises_when_no_published(self, app_generate_session: Session) -> None:
+        app = _persist_app(app_generate_session, workflow_id=str(uuid.uuid4()))
 
         with pytest.raises(ValueError, match="Workflow not published"):
-            AppGenerateService._get_workflow(_make_app(AppMode.WORKFLOW), InvokeFrom.SERVICE_API, session=MagicMock())
+            AppGenerateService._get_workflow(app, InvokeFrom.SERVICE_API, session=app_generate_session)
 
-    def test_specific_workflow_id_valid_uuid(self, mocker: MockerFixture):
+    def test_specific_workflow_id_valid_uuid(self, app_generate_session: Session) -> None:
         valid_uuid = str(uuid.uuid4())
-        specific_wf = _make_workflow(workflow_id=valid_uuid)
-        ws = MagicMock()
-        ws.get_published_workflow_by_id.return_value = specific_wf
-        mocker.patch("services.app_generate_service.WorkflowService", return_value=ws)
+        app = _persist_app(app_generate_session)
+        specific_workflow = _persist_workflow(app_generate_session, workflow_id=valid_uuid, version="2")
 
         result = AppGenerateService._get_workflow(
-            _make_app(AppMode.WORKFLOW),
+            app,
             InvokeFrom.SERVICE_API,
             workflow_id=valid_uuid,
-            session=MagicMock(),
+            session=app_generate_session,
         )
-        assert result is specific_wf
-        ws.get_published_workflow_by_id.assert_called_once()
+        assert result.id == specific_workflow.id
 
-    def test_specific_workflow_id_invalid_uuid(self, mocker: MockerFixture):
-        ws = MagicMock()
-        mocker.patch("services.app_generate_service.WorkflowService", return_value=ws)
+    def test_specific_workflow_id_invalid_uuid(self, app_generate_session: Session) -> None:
+        app = _persist_app(app_generate_session)
 
         with pytest.raises(WorkflowIdFormatError):
             AppGenerateService._get_workflow(
-                _make_app(AppMode.WORKFLOW),
+                app,
                 InvokeFrom.SERVICE_API,
                 workflow_id="not-a-uuid",
-                session=MagicMock(),
+                session=app_generate_session,
             )
 
-    def test_specific_workflow_id_not_found(self, mocker: MockerFixture):
+    def test_specific_workflow_id_not_found_for_other_tenant(self, app_generate_session: Session) -> None:
         valid_uuid = str(uuid.uuid4())
-        ws = MagicMock()
-        ws.get_published_workflow_by_id.return_value = None
-        mocker.patch("services.app_generate_service.WorkflowService", return_value=ws)
+        app = _persist_app(app_generate_session)
+        _persist_workflow(
+            app_generate_session,
+            app_id="other-app",
+            tenant_id="other-tenant",
+            workflow_id=valid_uuid,
+            version="1",
+        )
 
         with pytest.raises(WorkflowNotFoundError):
             AppGenerateService._get_workflow(
-                _make_app(AppMode.WORKFLOW),
+                app,
                 InvokeFrom.SERVICE_API,
                 workflow_id=valid_uuid,
-                session=MagicMock(),
+                session=app_generate_session,
             )
 
 
@@ -719,7 +814,7 @@ class TestGetWorkflow:
 # generate_single_iteration
 # ---------------------------------------------------------------------------
 class TestGenerateSingleIteration:
-    def test_advanced_chat_mode(self, mocker: MockerFixture):
+    def test_advanced_chat_mode(self, mocker: MockerFixture, app_generate_session: Session):
         workflow = _make_workflow()
         mocker.patch.object(AppGenerateService, "_get_workflow", return_value=workflow)
         gen_spy = mocker.patch(
@@ -736,12 +831,12 @@ class TestGenerateSingleIteration:
             user=_make_user(),
             node_id="n1",
             args={"k": "v"},
-            session=MagicMock(),
+            session=app_generate_session,
         )
         iter_spy.assert_called_once()
         assert result == {"event": "iteration"}
 
-    def test_workflow_mode(self, mocker: MockerFixture):
+    def test_workflow_mode(self, mocker: MockerFixture, app_generate_session: Session):
         workflow = _make_workflow()
         mocker.patch.object(AppGenerateService, "_get_workflow", return_value=workflow)
         mocker.patch(
@@ -758,16 +853,16 @@ class TestGenerateSingleIteration:
             user=_make_user(),
             node_id="n1",
             args={"k": "v"},
-            session=MagicMock(),
+            session=app_generate_session,
         )
         iter_spy.assert_called_once()
         assert result == {"event": "wf-iteration"}
 
-    def test_invalid_mode_raises(self, mocker: MockerFixture):
+    def test_invalid_mode_raises(self, mocker: MockerFixture, app_generate_session: Session):
         app = _make_app(AppMode.CHAT)
         with pytest.raises(ValueError, match="Invalid app mode"):
             AppGenerateService.generate_single_iteration(
-                app_model=app, user=_make_user(), node_id="n1", args={}, session=MagicMock()
+                app_model=app, user=_make_user(), node_id="n1", args={}, session=app_generate_session
             )
 
 
@@ -775,7 +870,7 @@ class TestGenerateSingleIteration:
 # generate_single_loop
 # ---------------------------------------------------------------------------
 class TestGenerateSingleLoop:
-    def test_advanced_chat_mode(self, mocker: MockerFixture):
+    def test_advanced_chat_mode(self, mocker: MockerFixture, app_generate_session: Session):
         workflow = _make_workflow()
         mocker.patch.object(AppGenerateService, "_get_workflow", return_value=workflow)
         mocker.patch(
@@ -792,12 +887,12 @@ class TestGenerateSingleLoop:
             user=_make_user(),
             node_id="n1",
             args=MagicMock(),
-            session=MagicMock(),
+            session=app_generate_session,
         )
         loop_spy.assert_called_once()
         assert result == {"event": "loop"}
 
-    def test_workflow_mode(self, mocker: MockerFixture):
+    def test_workflow_mode(self, mocker: MockerFixture, app_generate_session: Session):
         workflow = _make_workflow()
         mocker.patch.object(AppGenerateService, "_get_workflow", return_value=workflow)
         mocker.patch(
@@ -814,16 +909,16 @@ class TestGenerateSingleLoop:
             user=_make_user(),
             node_id="n1",
             args=MagicMock(),
-            session=MagicMock(),
+            session=app_generate_session,
         )
         loop_spy.assert_called_once()
         assert result == {"event": "wf-loop"}
 
-    def test_invalid_mode_raises(self, mocker: MockerFixture):
+    def test_invalid_mode_raises(self, mocker: MockerFixture, app_generate_session: Session):
         app = _make_app(AppMode.COMPLETION)
         with pytest.raises(ValueError, match="Invalid app mode"):
             AppGenerateService.generate_single_loop(
-                app_model=app, user=_make_user(), node_id="n1", args=MagicMock(), session=MagicMock()
+                app_model=app, user=_make_user(), node_id="n1", args=MagicMock(), session=app_generate_session
             )
 
 
@@ -831,12 +926,12 @@ class TestGenerateSingleLoop:
 # generate_more_like_this
 # ---------------------------------------------------------------------------
 class TestGenerateMoreLikeThis:
-    def test_delegates_to_completion_generator(self, mocker: MockerFixture):
+    def test_delegates_to_completion_generator(self, mocker: MockerFixture, app_generate_session: Session):
         gen_spy = mocker.patch(
             "services.app_generate_service.CompletionAppGenerator.generate_more_like_this",
             return_value={"result": "similar"},
         )
-        session = MagicMock()
+        session = app_generate_session
         result = AppGenerateService.generate_more_like_this(
             app_model=_make_app(AppMode.COMPLETION),
             user=_make_user(),

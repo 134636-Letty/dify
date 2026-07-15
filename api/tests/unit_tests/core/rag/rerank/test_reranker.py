@@ -12,11 +12,13 @@ All tests use mocking to avoid external dependencies and ensure fast, reliable e
 Tests follow the Arrange-Act-Assert pattern for clarity.
 """
 
+from datetime import UTC, datetime
 from operator import itemgetter
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from sqlalchemy.orm import Session
 
 from core.model_manager import ModelInstance
 from core.rag.index_processor.constant.doc_type import DocType
@@ -28,7 +30,30 @@ from core.rag.rerank.rerank_factory import RerankRunnerFactory
 from core.rag.rerank.rerank_model import RerankModelRunner
 from core.rag.rerank.rerank_type import RerankMode
 from core.rag.rerank.weight_rerank import WeightRerankRunner
+from extensions.storage.storage_type import StorageType
 from graphon.model_runtime.entities.rerank_entities import RerankDocument, RerankResult
+from models.enums import CreatorUserRole
+from models.model import UploadFile
+
+
+def _persist_upload_file(session: Session, *, file_id: str, key: str) -> UploadFile:
+    upload_file = UploadFile(
+        tenant_id="test-tenant-id",
+        storage_type=StorageType.LOCAL,
+        key=key,
+        name="image.png",
+        size=10,
+        extension="png",
+        mime_type="image/png",
+        created_by_role=CreatorUserRole.ACCOUNT,
+        created_by="account-id",
+        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        used=False,
+    )
+    upload_file.id = file_id
+    session.add(upload_file)
+    session.commit()
+    return upload_file
 
 
 def create_mock_model_instance() -> ModelInstance:
@@ -467,7 +492,12 @@ class TestRerankModelRunnerMultimodal:
         assert len(result) == 1
         assert result[0].metadata["score"] == 0.88
 
-    def test_fetch_multimodal_rerank_builds_docs_and_calls_text_rerank(self, rerank_runner):
+    @pytest.mark.parametrize("sqlite_session", [(UploadFile,)], indirect=True)
+    def test_fetch_multimodal_rerank_builds_docs_and_calls_text_rerank(
+        self, rerank_runner, sqlite_session: Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        _persist_upload_file(sqlite_session, file_id="img-1", key="image-key")
+        monkeypatch.setattr("core.rag.rerank.rerank_model.db", SimpleNamespace(session=sqlite_session))
         image_doc = Document(
             page_content="image-content",
             metadata={"doc_id": "img-1", "doc_type": DocType.IMAGE},
@@ -486,7 +516,6 @@ class TestRerankModelRunnerMultimodal:
         rerank_result = RerankResult(model="rerank-model", docs=[])
 
         with (
-            patch("core.rag.rerank.rerank_model.db.session.get", return_value=SimpleNamespace(key="image-key")),
             patch("core.rag.rerank.rerank_model.storage.load_once", return_value=b"image-bytes") as mock_load_once,
             patch.object(
                 rerank_runner,
@@ -506,7 +535,11 @@ class TestRerankModelRunnerMultimodal:
         text_rerank_call_args = mock_text_rerank.call_args.args
         assert len(text_rerank_call_args[1]) == 3
 
-    def test_fetch_multimodal_rerank_skips_missing_image_upload(self, rerank_runner):
+    @pytest.mark.parametrize("sqlite_session", [(UploadFile,)], indirect=True)
+    def test_fetch_multimodal_rerank_skips_missing_image_upload(
+        self, rerank_runner, sqlite_session: Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("core.rag.rerank.rerank_model.db", SimpleNamespace(session=sqlite_session))
         image_doc = Document(
             page_content="image-content",
             metadata={"doc_id": "img-missing", "doc_type": DocType.IMAGE},
@@ -514,14 +547,11 @@ class TestRerankModelRunnerMultimodal:
         )
         rerank_result = RerankResult(model="rerank-model", docs=[])
 
-        with (
-            patch("core.rag.rerank.rerank_model.db.session.get", return_value=None),
-            patch.object(
-                rerank_runner,
-                "fetch_text_rerank",
-                return_value=(rerank_result, [image_doc]),
-            ) as mock_text_rerank,
-        ):
+        with patch.object(
+            rerank_runner,
+            "fetch_text_rerank",
+            return_value=(rerank_result, [image_doc]),
+        ) as mock_text_rerank:
             result, unique_documents = rerank_runner.fetch_multimodal_rerank(
                 query="python",
                 documents=[image_doc],
@@ -533,9 +563,16 @@ class TestRerankModelRunnerMultimodal:
         docs_arg = mock_text_rerank.call_args.args[1]
         assert len(docs_arg) == 1
 
+    @pytest.mark.parametrize("sqlite_session", [(UploadFile,)], indirect=True)
     def test_fetch_multimodal_rerank_image_query_invokes_multimodal_model(
-        self, rerank_runner: RerankModelRunner, mock_model_instance
+        self,
+        rerank_runner: RerankModelRunner,
+        mock_model_instance,
+        sqlite_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
     ):
+        _persist_upload_file(sqlite_session, file_id="query-upload-id", key="query-image-key")
+        monkeypatch.setattr("core.rag.rerank.rerank_model.db", SimpleNamespace(session=sqlite_session))
         text_doc = Document(
             page_content="text-content",
             metadata={"doc_id": "txt-1", "doc_type": DocType.TEXT},
@@ -547,12 +584,7 @@ class TestRerankModelRunnerMultimodal:
         )
         mock_model_instance.invoke_multimodal_rerank.return_value = rerank_result
 
-        session = MagicMock()
-        session.get.return_value = SimpleNamespace(key="query-image-key")
-        with (
-            patch("core.rag.rerank.rerank_model.db.session", session),
-            patch("core.rag.rerank.rerank_model.storage.load_once", return_value=b"query-image-bytes"),
-        ):
+        with patch("core.rag.rerank.rerank_model.storage.load_once", return_value=b"query-image-bytes"):
             result, unique_documents = rerank_runner.fetch_multimodal_rerank(
                 query="query-upload-id",
                 documents=[text_doc],
@@ -568,14 +600,17 @@ class TestRerankModelRunnerMultimodal:
         assert invoke_kwargs["docs"][0]["content"] == "text-content"
         assert "user" not in invoke_kwargs
 
-    def test_fetch_multimodal_rerank_raises_when_query_image_not_found(self, rerank_runner):
-        with patch("core.rag.rerank.rerank_model.db.session.get", return_value=None):
-            with pytest.raises(ValueError, match="Upload file not found for query"):
-                rerank_runner.fetch_multimodal_rerank(
-                    query="missing-upload-id",
-                    documents=[],
-                    query_type=QueryType.IMAGE_QUERY,
-                )
+    @pytest.mark.parametrize("sqlite_session", [(UploadFile,)], indirect=True)
+    def test_fetch_multimodal_rerank_raises_when_query_image_not_found(
+        self, rerank_runner, sqlite_session: Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("core.rag.rerank.rerank_model.db", SimpleNamespace(session=sqlite_session))
+        with pytest.raises(ValueError, match="Upload file not found for query"):
+            rerank_runner.fetch_multimodal_rerank(
+                query="missing-upload-id",
+                documents=[],
+                query_type=QueryType.IMAGE_QUERY,
+            )
 
     def test_fetch_multimodal_rerank_rejects_unsupported_query_type(self, rerank_runner):
         with pytest.raises(ValueError, match="is not supported"):

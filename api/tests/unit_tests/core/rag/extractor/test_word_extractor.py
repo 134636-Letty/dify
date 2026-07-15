@@ -5,7 +5,7 @@ import logging
 import os
 import tempfile
 from collections import UserDict
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Protocol, cast, override
@@ -15,13 +15,37 @@ import pytest
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from sqlalchemy import Engine, func, select
+from sqlalchemy.orm import Session
 
 import core.rag.extractor.word_extractor as we
 from core.rag.extractor.word_extractor import WordExtractor
+from extensions.storage.storage_type import StorageType
+from models.base import TypeBase
+from models.enums import CreatorUserRole
+from models.model import UploadFile
 
 
 class _TextOxmlElement(Protocol):
     text: str | None
+
+
+@pytest.fixture
+def upload_file_session(sqlite_engine: Engine) -> Iterator[Session]:
+    """Create the extractor's upload table and expose a real SQLite session."""
+    TypeBase.metadata.create_all(sqlite_engine, tables=[UploadFile.__table__])
+    with Session(sqlite_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture
+def bind_word_db(monkeypatch: pytest.MonkeyPatch, upload_file_session: Session) -> None:
+    """Bind the extractor's Flask-style ``db.session`` to SQLite for this test."""
+    monkeypatch.setattr(we, "db", SimpleNamespace(session=upload_file_session))
+
+
+def _assert_no_upload_files(session: Session) -> None:
+    assert session.scalar(select(func.count()).select_from(UploadFile)) == 0
 
 
 def _set_oxml_text(element: object, text: str) -> None:
@@ -111,7 +135,11 @@ def test_init_downloads_via_remote_fetcher(monkeypatch: pytest.MonkeyPatch):
         extractor.temp_file.close()
 
 
-def test_extract_images_from_docx(monkeypatch: pytest.MonkeyPatch):
+def test_extract_images_from_docx(
+    monkeypatch: pytest.MonkeyPatch,
+    upload_file_session: Session,
+    bind_word_db: None,
+) -> None:
     external_bytes = b"ext-bytes"
     internal_bytes = b"int-bytes"
 
@@ -123,34 +151,9 @@ def test_extract_images_from_docx(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(we, "storage", SimpleNamespace(save=save))
 
-    # Patch db.session to record adds/commit
-    class DummySession:
-        def __init__(self):
-            self.added = []
-            self.committed = False
-
-        def add(self, obj):
-            self.added.append(obj)
-
-        def commit(self):
-            self.committed = True
-
-    db_stub = SimpleNamespace(session=DummySession())
-    monkeypatch.setattr(we, "db", db_stub)
-
     # Patch config values used for URL composition and storage type
     monkeypatch.setattr(we.dify_config, "FILES_URL", "http://files.local", raising=False)
     monkeypatch.setattr(we.dify_config, "STORAGE_TYPE", "local", raising=False)
-
-    # Patch UploadFile to avoid real DB models
-    class FakeUploadFile:
-        _i = 0
-
-        def __init__(self, **kwargs):  # kwargs match the real signature fields
-            type(self)._i += 1
-            self.id = f"u{self._i}"
-
-    monkeypatch.setattr(we, "UploadFile", FakeUploadFile)
 
     # Patch external image fetcher
     def fake_make_request(method: str, url: str, **kwargs):
@@ -189,9 +192,18 @@ def test_extract_images_from_docx(monkeypatch: pytest.MonkeyPatch):
     assert external_bytes in payloads
     assert internal_bytes in payloads
 
-    # DB interactions should be recorded
-    assert len(db_stub.session.added) == 2
-    assert db_stub.session.committed is True
+    upload_files = upload_file_session.scalars(select(UploadFile).order_by(UploadFile.key)).all()
+    assert len(upload_files) == 2
+    assert {upload_file.key for upload_file in upload_files} == {key for key, _ in saves}
+    assert {upload_file.tenant_id for upload_file in upload_files} == {"t1"}
+    assert {upload_file.created_by for upload_file in upload_files} == {"u1"}
+    assert {upload_file.created_by_role for upload_file in upload_files} == {CreatorUserRole.ACCOUNT}
+    assert {upload_file.storage_type for upload_file in upload_files} == {StorageType.LOCAL}
+    # External MIME guessing includes the dot; DOCX relationship suffixes do not.
+    assert {upload_file.extension for upload_file in upload_files} == {".png", "png"}
+    assert {upload_file.mime_type for upload_file in upload_files} == {"image/png"}
+    assert all(upload_file.used and upload_file.used_by == "u1" for upload_file in upload_files)
+    assert all(any(upload_file.id in image_url for image_url in image_map.values()) for upload_file in upload_files)
 
 
 def test_extract_images_from_docx_uses_internal_files_url():
@@ -225,11 +237,13 @@ def test_extract_images_from_docx_uses_internal_files_url():
         dify_config.INTERNAL_FILES_URL = original_internal_files_url
 
 
-def test_extract_hyperlinks(monkeypatch: pytest.MonkeyPatch):
+def test_extract_hyperlinks(
+    monkeypatch: pytest.MonkeyPatch,
+    upload_file_session: Session,
+    bind_word_db: None,
+) -> None:
     # Mock db and storage to avoid issues during image extraction (even if no images are present)
     monkeypatch.setattr(we, "storage", SimpleNamespace(save=lambda k, d: None))
-    db_stub = SimpleNamespace(session=SimpleNamespace(add=lambda o: None, commit=lambda: None))
-    monkeypatch.setattr(we, "db", db_stub)
     monkeypatch.setattr(we.dify_config, "FILES_URL", "http://files.local", raising=False)
     monkeypatch.setattr(we.dify_config, "STORAGE_TYPE", "local", raising=False)
 
@@ -265,16 +279,19 @@ def test_extract_hyperlinks(monkeypatch: pytest.MonkeyPatch):
         docs = extractor.extract()
         # Verify modern hyperlink extraction
         assert "Visit[Dify](https://dify.ai)" in docs[0].page_content
+        _assert_no_upload_files(upload_file_session)
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
 
-def test_extract_legacy_hyperlinks(monkeypatch: pytest.MonkeyPatch):
+def test_extract_legacy_hyperlinks(
+    monkeypatch: pytest.MonkeyPatch,
+    upload_file_session: Session,
+    bind_word_db: None,
+) -> None:
     # Mock db and storage
     monkeypatch.setattr(we, "storage", SimpleNamespace(save=lambda k, d: None))
-    db_stub = SimpleNamespace(session=SimpleNamespace(add=lambda o: None, commit=lambda: None))
-    monkeypatch.setattr(we, "db", db_stub)
     monkeypatch.setattr(we.dify_config, "FILES_URL", "http://files.local", raising=False)
     monkeypatch.setattr(we.dify_config, "STORAGE_TYPE", "local", raising=False)
 
@@ -327,6 +344,7 @@ def test_extract_legacy_hyperlinks(monkeypatch: pytest.MonkeyPatch):
         docs = extractor.extract()
         # Verify legacy hyperlink extraction
         assert "[Example](http://example.com)" in docs[0].page_content
+        _assert_no_upload_files(upload_file_session)
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -414,7 +432,11 @@ def test_close_closes_awaitable_close_result():
     extractor.temp_file.close.assert_called_once()
 
 
-def test_extract_images_handles_invalid_external_cases(monkeypatch: pytest.MonkeyPatch):
+def test_extract_images_handles_invalid_external_cases(
+    monkeypatch: pytest.MonkeyPatch,
+    upload_file_session: Session,
+    bind_word_db: None,
+) -> None:
     class FakeTargetRef:
         def __contains__(self, item):
             return item == "image"
@@ -445,8 +467,6 @@ def test_extract_images_handles_invalid_external_cases(monkeypatch: pytest.Monke
         return SimpleNamespace(status_code=200, headers={"Content-Type": "application/unknown"}, content=b"x")
 
     monkeypatch.setattr(we, "remote_fetcher", SimpleNamespace(make_request=fake_make_request))
-    db_stub = SimpleNamespace(session=SimpleNamespace(add=lambda obj: None, commit=MagicMock()))
-    monkeypatch.setattr(we, "db", db_stub)
     monkeypatch.setattr(we, "storage", SimpleNamespace(save=lambda key, data: None))
     monkeypatch.setattr(we.dify_config, "FILES_URL", "http://files.local", raising=False)
 
@@ -457,7 +477,7 @@ def test_extract_images_handles_invalid_external_cases(monkeypatch: pytest.Monke
     result = extractor._extract_images_from_docx(doc)
 
     assert result == {}
-    db_stub.session.commit.assert_called_once()
+    _assert_no_upload_files(upload_file_session)
 
 
 def test_table_to_markdown_and_parse_helpers(monkeypatch: pytest.MonkeyPatch):

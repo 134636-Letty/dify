@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
 from core.app.app_config.entities import (
     AdvancedChatMessageEntity,
@@ -20,7 +24,9 @@ from core.app.app_config.entities import (
 from core.helper import encrypter
 from core.prompt.utils.prompt_template_parser import PromptTemplateParser
 from models.api_based_extension import APIBasedExtension, APIBasedExtensionPoint
+from models.base import TypeBase
 from models.model import Account, App, AppMode, AppModelConfig
+from models.workflow import Workflow
 from services.workflow import workflow_converter as converter_module
 from services.workflow.workflow_converter import WorkflowConverter
 
@@ -39,6 +45,18 @@ except ModuleNotFoundError:
 @pytest.fixture
 def converter() -> WorkflowConverter:
     return WorkflowConverter()
+
+
+@pytest.fixture
+def db_session(sqlite_engine: Engine) -> Iterator[Session]:
+    """Provide the converter with a real session containing only its model tables."""
+
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[App.__table__, Workflow.__table__, APIBasedExtension.__table__],
+    )
+    with Session(sqlite_engine, expire_on_commit=False) as session:
+        yield session
 
 
 def _app_model(**kwargs: Any) -> App:
@@ -88,7 +106,9 @@ def test__convert_to_start_node(default_variables: list[VariableEntity]) -> None
     assert result["data"]["variables"][0]["variable"] == "text_input"
 
 
-def test__convert_to_http_request_node_for_chatbot(default_variables: list[VariableEntity]) -> None:
+def test__convert_to_http_request_node_for_chatbot(
+    default_variables: list[VariableEntity], db_session: Session
+) -> None:
     app_model = MagicMock()
     app_model.id = "app_id"
     app_model.tenant_id = "tenant_id"
@@ -118,7 +138,7 @@ def test__convert_to_http_request_node_for_chatbot(default_variables: list[Varia
         app_model=app_model,
         variables=default_variables,
         external_data_variables=external_data_variables,
-        session=MagicMock(),
+        session=db_session,
     )
 
     assert len(nodes) == 2
@@ -131,7 +151,9 @@ def test__convert_to_http_request_node_for_chatbot(default_variables: list[Varia
     assert mapping == {"external_variable": "code_1"}
 
 
-def test__convert_to_http_request_node_for_workflow_app(default_variables: list[VariableEntity]) -> None:
+def test__convert_to_http_request_node_for_workflow_app(
+    default_variables: list[VariableEntity], db_session: Session
+) -> None:
     app_model = MagicMock()
     app_model.id = "app_id"
     app_model.tenant_id = "tenant_id"
@@ -161,7 +183,7 @@ def test__convert_to_http_request_node_for_workflow_app(default_variables: list[
         app_model=app_model,
         variables=default_variables,
         external_data_variables=external_data_variables,
-        session=MagicMock(),
+        session=db_session,
     )
 
     body = json.loads(nodes[0]["data"]["body"]["data"])
@@ -355,7 +377,9 @@ def test__convert_to_answer_node() -> None:
     assert node["data"]["type"] == BuiltinNodeTypes.ANSWER
 
 
-def test_convert_to_workflow_should_raise_when_app_model_config_is_missing(converter: WorkflowConverter) -> None:
+def test_convert_to_workflow_should_raise_when_app_model_config_is_missing(
+    converter: WorkflowConverter, db_session: Session
+) -> None:
     app_model = _app_model(app_model_config=None)
 
     with pytest.raises(ValueError, match="App model config is required"):
@@ -366,7 +390,7 @@ def test_convert_to_workflow_should_raise_when_app_model_config_is_missing(conve
             icon_type="emoji",
             icon="robot",
             icon_background="#fff",
-            session=MagicMock(),
+            session=db_session,
         )
 
 
@@ -382,16 +406,10 @@ def test_convert_to_workflow_should_create_new_app_with_fallback_fields(
     monkeypatch: pytest.MonkeyPatch,
     source_mode: AppMode,
     expected_mode: AppMode,
+    db_session: Session,
 ) -> None:
-    class FakeApp:
-        def __init__(self) -> None:
-            self.id = "new-app-id"
-
     workflow = SimpleNamespace(app_id=None)
     monkeypatch.setattr(converter, "convert_app_model_config_to_workflow", MagicMock(return_value=workflow))
-    monkeypatch.setattr(converter_module, "App", FakeApp)
-
-    db_session = SimpleNamespace(add=MagicMock(), flush=MagicMock(), commit=MagicMock())
 
     send_mock = MagicMock()
     monkeypatch.setattr(converter_module.app_was_created, "send", send_mock)
@@ -428,16 +446,15 @@ def test_convert_to_workflow_should_create_new_app_with_fallback_fields(
     assert new_app.icon == "sparkles"
     assert new_app.icon_background == "#123456"
     assert new_app.created_by == "account-1"
-    assert workflow.app_id == "new-app-id"
-    db_session.add.assert_called_once()
-    db_session.flush.assert_called_once()
-    db_session.commit.assert_called_once()
+    assert workflow.app_id == new_app.id
+    assert db_session.get(App, new_app.id) is new_app
     send_mock.assert_called_once_with(new_app, account=account)
 
 
 def test_convert_app_model_config_to_workflow_should_build_advanced_chat_graph_and_features(
     converter: WorkflowConverter,
     monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
     app_model = _app_model(id="app-1", tenant_id="tenant-1", mode=AppMode.CHAT)
     app_config = SimpleNamespace(
@@ -458,12 +475,6 @@ def test_convert_app_model_config_to_workflow_should_build_advanced_chat_graph_a
             "retriever_resource": {"enabled": True},
         },
     )
-
-    class FakeWorkflow:
-        VERSION_DRAFT = "draft"
-
-        def __init__(self, **kwargs: Any) -> None:
-            self.__dict__.update(kwargs)
 
     monkeypatch.setattr(converter, "_get_new_app_mode", MagicMock(return_value=AppMode.ADVANCED_CHAT))
     monkeypatch.setattr(converter, "_convert_to_app_config", MagicMock(return_value=app_config))
@@ -501,10 +512,6 @@ def test_convert_app_model_config_to_workflow_should_build_advanced_chat_graph_a
         "_convert_to_answer_node",
         MagicMock(return_value={"id": "answer", "position": None, "data": {"type": BuiltinNodeTypes.ANSWER}}),
     )
-    monkeypatch.setattr(converter_module, "Workflow", FakeWorkflow)
-
-    db_session = SimpleNamespace(add=MagicMock(), commit=MagicMock())
-
     workflow = converter.convert_app_model_config_to_workflow(
         app_model=app_model,
         app_model_config=_app_model_config(id="cfg"),
@@ -519,13 +526,13 @@ def test_convert_app_model_config_to_workflow_should_build_advanced_chat_graph_a
     features = json.loads(workflow.features)
     assert "opening_statement" in features
     assert "retriever_resource" in features
-    db_session.add.assert_called_once()
-    db_session.commit.assert_called_once()
+    assert db_session.get(Workflow, workflow.id) is workflow
 
 
 def test_convert_app_model_config_to_workflow_should_build_workflow_mode_with_end_node(
     converter: WorkflowConverter,
     monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
     app_model = _app_model(id="app-1", tenant_id="tenant-1", mode=AppMode.COMPLETION)
     app_config = SimpleNamespace(
@@ -541,12 +548,6 @@ def test_convert_app_model_config_to_workflow_should_build_workflow_mode_with_en
             "sensitive_word_avoidance": {"enabled": False},
         },
     )
-
-    class FakeWorkflow:
-        VERSION_DRAFT = "draft"
-
-        def __init__(self, **kwargs: Any) -> None:
-            self.__dict__.update(kwargs)
 
     monkeypatch.setattr(converter, "_get_new_app_mode", MagicMock(return_value=AppMode.WORKFLOW))
     monkeypatch.setattr(converter, "_convert_to_app_config", MagicMock(return_value=app_config))
@@ -568,10 +569,6 @@ def test_convert_app_model_config_to_workflow_should_build_workflow_mode_with_en
         "_convert_to_end_node",
         MagicMock(return_value={"id": "end", "position": None, "data": {"type": BuiltinNodeTypes.END}}),
     )
-    monkeypatch.setattr(converter_module, "Workflow", FakeWorkflow)
-
-    db_session = SimpleNamespace(add=MagicMock(), commit=MagicMock())
-
     workflow = converter.convert_app_model_config_to_workflow(
         app_model=app_model,
         app_model_config=_app_model_config(id="cfg"),
@@ -585,6 +582,7 @@ def test_convert_app_model_config_to_workflow_should_build_workflow_mode_with_en
 
     features = json.loads(workflow.features)
     assert set(features.keys()) == {"text_to_speech", "file_upload", "sensitive_word_avoidance"}
+    assert db_session.get(Workflow, workflow.id) is workflow
 
 
 def test_convert_to_app_config_should_route_to_correct_manager(
@@ -636,6 +634,7 @@ def test_convert_to_app_config_should_raise_for_invalid_app_mode(converter: Work
 
 def test_convert_to_http_request_node_should_skip_non_api_and_missing_extension_id(
     converter: WorkflowConverter,
+    db_session: Session,
 ) -> None:
     app_model = _app_model(id="app-1", tenant_id="tenant-1", mode=AppMode.CHAT)
     external_data_variables = [
@@ -647,7 +646,7 @@ def test_convert_to_http_request_node_should_skip_non_api_and_missing_extension_
         app_model=app_model,
         variables=[],
         external_data_variables=external_data_variables,
-        session=MagicMock(),
+        session=db_session,
     )
 
     assert nodes == []
@@ -811,25 +810,42 @@ def test_graph_helpers_should_create_edges_append_nodes_and_choose_mode(converte
 
 def test_get_api_based_extension_should_raise_when_extension_not_found(
     converter: WorkflowConverter,
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
-    db_session = SimpleNamespace(scalar=MagicMock(return_value=None))
-
     with pytest.raises(ValueError, match="API Based Extension not found"):
         converter._get_api_based_extension(tenant_id="tenant-1", api_based_extension_id="ext-1", session=db_session)
-    db_session.scalar.assert_called_once()
 
 
 def test_get_api_based_extension_should_return_entity_when_found(
     converter: WorkflowConverter,
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
-    extension = SimpleNamespace(id="ext-1")
-    db_session = SimpleNamespace(scalar=MagicMock(return_value=extension))
+    extension = APIBasedExtension(
+        tenant_id="tenant-1",
+        name="api extension",
+        api_endpoint="https://example.com",
+        api_key="encrypted",
+    )
+    other_tenant_extension = APIBasedExtension(
+        tenant_id="tenant-2",
+        name="other extension",
+        api_endpoint="https://example.com/other",
+        api_key="encrypted",
+    )
+    db_session.add_all([extension, other_tenant_extension])
+    db_session.commit()
 
     result = converter._get_api_based_extension(
-        tenant_id="tenant-1", api_based_extension_id="ext-1", session=db_session
+        tenant_id="tenant-1", api_based_extension_id=extension.id, session=db_session
     )
 
     assert result is extension
-    db_session.scalar.assert_called_once()
+    assert (
+        db_session.scalar(
+            select(APIBasedExtension).where(
+                APIBasedExtension.id == other_tenant_extension.id,
+                APIBasedExtension.tenant_id == "tenant-1",
+            )
+        )
+        is None
+    )

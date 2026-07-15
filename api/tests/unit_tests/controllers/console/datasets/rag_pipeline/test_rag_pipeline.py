@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from inspect import unwrap
+from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 
 import pytest
@@ -20,7 +20,6 @@ from controllers.console.datasets.rag_pipeline.rag_pipeline import (
 )
 from models.account import Account
 from models.dataset import PipelineCustomizedTemplate
-from models.engine import db
 from services.entities.knowledge_entities.rag_pipeline_entities import PipelineTemplateInfoEntity
 
 
@@ -59,17 +58,6 @@ def _account() -> Account:
     account = Account(name="Test User", email="test@example.com")
     account.id = "account-1"
     return account
-
-
-@pytest.fixture
-def database_app() -> Iterator[Flask]:
-    app = Flask(__name__)
-    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
-    db.init_app(app)
-
-    with app.app_context():
-        PipelineCustomizedTemplate.__table__.create(db.engine)
-        yield app
 
 
 class TestPipelineTemplateListApi:
@@ -275,9 +263,9 @@ class TestCustomizedPipelineTemplateApi:
         assert (response, status) == ("", 204)
         assert deleted_templates == [("template-1", tenant_id)]
 
+    @pytest.mark.parametrize("sqlite_session", [(PipelineCustomizedTemplate,)], indirect=True)
     def test_post_exports_yaml_from_orm_template(
-        self,
-        database_app: Flask,
+        self, app: Flask, monkeypatch: pytest.MonkeyPatch, sqlite_engine: Engine, sqlite_session: Session
     ) -> None:
         api = CustomizedPipelineTemplateApi()
         method = unwrap(api.post)
@@ -293,26 +281,29 @@ class TestCustomizedPipelineTemplateApi:
             language="en-US",
             created_by="00000000-0000-0000-0000-000000000002",
         )
-        db.session.add(template)
-        db.session.commit()
+        template.id = "template-1"
+        sqlite_session.add(template)
+        sqlite_session.commit()
+        monkeypatch.setattr(module, "db", SimpleNamespace(engine=sqlite_engine))
 
-        with database_app.test_request_context("/rag/pipeline/customized/templates/template-1", method="POST"):
-            response, status = method(api, template.id)
+        with app.test_request_context("/rag/pipeline/customized/templates/template-1", method="POST"):
+            response, status = method(api, "template-1")
 
         assert status == 200
         assert response == {"data": "dsl: value"}
 
+    @pytest.mark.parametrize("sqlite_session", [(PipelineCustomizedTemplate,)], indirect=True)
     def test_post_raises_when_template_is_missing(
-        self,
-        database_app: Flask,
+        self, app: Flask, monkeypatch: pytest.MonkeyPatch, sqlite_engine: Engine, sqlite_session: Session
     ) -> None:
         api = CustomizedPipelineTemplateApi()
         method = unwrap(api.post)
-        with (
-            database_app.test_request_context("/rag/pipeline/customized/templates/missing", method="POST"),
-            pytest.raises(ValueError, match="Customized pipeline template not found"),
-        ):
-            method(api, "44444444-4444-4444-4444-444444444444")
+        assert sqlite_session.get(PipelineCustomizedTemplate, "missing") is None
+        monkeypatch.setattr(module, "db", SimpleNamespace(engine=sqlite_engine))
+
+        with app.test_request_context("/rag/pipeline/customized/templates/missing", method="POST"):
+            with pytest.raises(ValueError, match="Customized pipeline template not found"):
+                method(api, "missing")
 
 
 class TestPublishCustomizedPipelineTemplateApi:

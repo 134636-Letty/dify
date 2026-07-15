@@ -832,7 +832,7 @@ class DatasetIndexingEstimateApi(Resource):
                 file_details = db.session.scalars(
                     select(UploadFile).where(UploadFile.tenant_id == current_tenant_id, UploadFile.id.in_(file_ids))
                 ).all()
-                if file_details is None:
+                if not file_details:
                     raise NotFound("File not found.")
 
                 if file_details:

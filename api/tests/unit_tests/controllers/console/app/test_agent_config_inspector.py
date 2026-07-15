@@ -7,10 +7,17 @@ workflow-node agent binding, and service delegation for the new config surface.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Iterator
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
+from uuid import uuid4
 
+import pytest
 from flask import Flask
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from controllers.console.app import agent_config_inspector as inspector
 from controllers.console.app.agent_config_inspector import (
@@ -28,10 +35,38 @@ from controllers.console.app.agent_config_inspector import (
     AgentConfigSkillUploadByAgentApi,
     console_ns,
 )
+from models.agent import (
+    Agent,
+    AgentConfigDraft,
+    AgentConfigDraftType,
+    AgentConfigSnapshot,
+    AgentScope,
+    AgentSource,
+)
+from models.agent_config_entities import AgentSoulConfig
+from models.base import TypeBase
 from services.agent_config_service import AgentConfigServiceError
 
 _MOD = "controllers.console.app.agent_config_inspector"
 app = Flask(__name__)
+
+
+@dataclass(frozen=True)
+class _Database:
+    session: scoped_session[Session]
+
+
+@pytest.fixture
+def inspector_session(sqlite_engine: Engine) -> Iterator[scoped_session[Session]]:
+    """Provide the callable Flask-SQLAlchemy session interface over isolated agent config tables."""
+
+    tables = [TypeBase.metadata.tables[model.__tablename__] for model in (Agent, AgentConfigDraft, AgentConfigSnapshot)]
+    TypeBase.metadata.create_all(sqlite_engine, tables=tables)
+    session = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    try:
+        yield session
+    finally:
+        session.remove()
 
 
 def _raw(method):
@@ -90,24 +125,106 @@ def test_manifest_resolves_workflow_node_agent_and_normal_draft():
     assert config_service.return_value.manifest.call_args.kwargs["config_version_kind"].value == "draft"
 
 
-def test_normal_draft_resolution_commits_created_draft_before_service_session() -> None:
+def test_normal_draft_resolution_commits_created_draft_before_service_session(
+    monkeypatch: pytest.MonkeyPatch,
+    inspector_session: scoped_session[Session],
+) -> None:
+    tenant_id = str(uuid4())
+    agent_id = str(uuid4())
+    account_id = str(uuid4())
+    snapshot_id = str(uuid4())
+    draft_id = str(uuid4())
+    agent = Agent(
+        id=agent_id,
+        tenant_id=tenant_id,
+        name="Inspector Agent",
+        scope=AgentScope.ROSTER,
+        source=AgentSource.ROSTER,
+        active_config_snapshot_id=snapshot_id,
+    )
+    snapshot = AgentConfigSnapshot(
+        id=snapshot_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        version=1,
+        config_snapshot=AgentSoulConfig(),
+        created_by=account_id,
+    )
+    foreign_agent_id = str(uuid4())
+    inspector_session.add_all(
+        [
+            agent,
+            snapshot,
+            Agent(
+                id=foreign_agent_id,
+                tenant_id=str(uuid4()),
+                name="Foreign Agent",
+                scope=AgentScope.ROSTER,
+                source=AgentSource.ROSTER,
+            ),
+        ]
+    )
+    inspector_session.commit()
+    monkeypatch.setattr(inspector, "db", _Database(session=inspector_session))
+
+    def create_draft(**kwargs: object) -> dict[str, object]:
+        session = kwargs["session"]
+        assert isinstance(session, Session)
+        draft = AgentConfigDraft(
+            id=draft_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            draft_type=AgentConfigDraftType.DRAFT,
+            draft_owner_key="",
+            config_snapshot=AgentSoulConfig(),
+            created_by=account_id,
+            updated_by=account_id,
+        )
+        session.add(draft)
+        return {"draft": {"id": draft_id}}
+
     with (
         patch(f"{_MOD}.AgentComposerService") as composer,
-        patch(f"{_MOD}.db") as db,
     ):
-        composer.load_agent_composer.return_value = {"draft": {"id": "draft-1"}}
+        composer.load_agent_composer.side_effect = create_draft
 
         version_id, version_kind = inspector._resolve_console_version(
-            tenant_id="tenant-1",
-            agent_id="agent-1",
-            account_id="acct-1",
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
             version_id=None,
             draft_type="draft",
         )
 
-    assert version_id == "draft-1"
+    assert version_id == draft_id
     assert version_kind.value == "draft"
-    db.session.commit.assert_called_once()
+    with Session(inspector_session.get_bind()) as verification_session:
+        persisted_draft = verification_session.scalar(
+            select(AgentConfigDraft).where(
+                AgentConfigDraft.id == draft_id,
+                AgentConfigDraft.tenant_id == tenant_id,
+                AgentConfigDraft.agent_id == agent_id,
+            )
+        )
+        assert persisted_draft is not None
+        assert verification_session.get(AgentConfigSnapshot, snapshot_id) is not None
+
+
+def test_normal_draft_resolution_returns_not_found_for_empty_state(
+    monkeypatch: pytest.MonkeyPatch,
+    inspector_session: scoped_session[Session],
+) -> None:
+    monkeypatch.setattr(inspector, "db", _Database(session=inspector_session))
+    with patch(f"{_MOD}.AgentComposerService") as composer:
+        composer.load_agent_composer.return_value = {"draft": None}
+        with pytest.raises(AgentConfigServiceError, match="agent config version was not found"):
+            inspector._resolve_console_version(
+                tenant_id=str(uuid4()),
+                agent_id=str(uuid4()),
+                account_id=str(uuid4()),
+                version_id=None,
+                draft_type="draft",
+            )
 
 
 def test_skill_inspect_by_agent_returns_strict_json_response():

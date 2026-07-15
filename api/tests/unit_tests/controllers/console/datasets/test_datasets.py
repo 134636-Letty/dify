@@ -1,5 +1,6 @@
 import datetime
 import json
+from collections.abc import Iterator
 from contextlib import ExitStack
 from inspect import unwrap
 from types import SimpleNamespace
@@ -7,6 +8,8 @@ from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
 import pytest
 from flask import Flask
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from werkzeug.exceptions import BadRequest, Forbidden, NotFound
 
 import services
@@ -37,11 +40,30 @@ from core.provider_manager import ProviderManager
 from core.rag.index_processor.constant.index_type import IndexStructureType
 from extensions.storage.storage_type import StorageType
 from models.account import Account, TenantAccountRole
-from models.dataset import Dataset, DatasetQuery, Document
-from models.enums import CreatorUserRole, DataSourceType, DocumentCreatedFrom, IndexingStatus
+from models.dataset import Dataset, DatasetPermission, DatasetQuery, Document, DocumentSegment
+from models.enums import CreatorUserRole, DataSourceType, DocumentCreatedFrom, IndexingStatus, SegmentStatus
 from models.model import ApiToken, App, AppMode, IconType, UploadFile
 from services.dataset_service import DatasetPermissionService, DatasetService
 from services.enterprise import rbac_service as enterprise_rbac_service
+
+
+@pytest.fixture
+def dataset_db_session(sqlite_engine: Engine) -> Iterator[scoped_session[Session]]:
+    """Bind the controller's callable session registry to an isolated SQLite database."""
+    tables = [
+        DatasetPermission.__table__,
+        UploadFile.__table__,
+        Document.__table__,
+        DocumentSegment.__table__,
+        ApiToken.__table__,
+    ]
+    Dataset.metadata.create_all(sqlite_engine, tables=tables)
+    session = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    with patch("controllers.console.datasets.datasets.db.session", session):
+        try:
+            yield session
+        finally:
+            session.remove()
 
 
 @pytest.fixture(autouse=True)
@@ -161,6 +183,27 @@ def make_document_status(**overrides) -> Document:
     }
     base.update(overrides)
     return Document(**base)
+
+
+def make_segment(position: int, *, completed: bool) -> DocumentSegment:
+    return DocumentSegment(
+        tenant_id="tenant-1",
+        dataset_id="dataset-1",
+        document_id="doc-1",
+        position=position,
+        content=f"segment {position}",
+        word_count=2,
+        tokens=2,
+        created_by="account-1",
+        status=SegmentStatus.COMPLETED if completed else SegmentStatus.WAITING,
+        completed_at=datetime.datetime.now(tz=datetime.UTC).replace(tzinfo=None) if completed else None,
+    )
+
+
+def make_api_token(id: str, *, token: str, tenant_id: str = "tenant-1") -> ApiToken:
+    api_token = ApiToken(tenant_id=tenant_id, type="dataset", token=token)
+    api_token.id = id
+    return api_token
 
 
 class TestDatasetList:
@@ -552,12 +595,14 @@ class TestDatasetList:
 
         assert resp["data"][0]["embedding_available"] is False
 
-    def test_partial_members_permission(self, app: Flask):
+    def test_partial_members_permission(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetListApi()
         method = unwrap(api.get)
 
         current_user = self._mock_user()
         datasets = [make_dataset(permission="partial_members")]
+        dataset_db_session.add(DatasetPermission(dataset_id="ds-1", account_id="u1", tenant_id="tenant-1"))
+        dataset_db_session.commit()
 
         with app.test_request_context("/datasets"):
             with (
@@ -565,10 +610,6 @@ class TestDatasetList:
                     DatasetService,
                     "get_datasets",
                     return_value=(datasets, 1),
-                ),
-                patch(
-                    "controllers.console.datasets.datasets.db.session.execute",
-                    return_value=MagicMock(all=lambda: [("ds-1", "u1")]),
                 ),
                 patch.object(
                     ProviderManager,
@@ -1384,13 +1425,15 @@ class TestDatasetIndexingEstimateApi:
             "dataset_id": None,
         }
 
-    def test_post_success_upload_file(self, app: Flask):
+    def test_post_success_upload_file(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetIndexingEstimateApi()
         method = unwrap(api.post)
 
         payload = self._base_payload()
 
         mock_file = self._upload_file()
+        dataset_db_session.add(mock_file)
+        dataset_db_session.commit()
 
         mock_response = IndexingEstimate(total_segments=100, preview=[])
 
@@ -1405,10 +1448,6 @@ class TestDatasetIndexingEstimateApi:
             patch(
                 "controllers.console.datasets.datasets.DocumentService.estimate_args_validate",
                 return_value=None,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: [mock_file]),
             ),
             patch(
                 "controllers.console.datasets.datasets.IndexingRunner.indexing_estimate",
@@ -1426,7 +1465,7 @@ class TestDatasetIndexingEstimateApi:
             "preview": [],
         }
 
-    def test_post_file_not_found(self, app: Flask):
+    def test_post_file_not_found(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetIndexingEstimateApi()
         method = unwrap(api.post)
 
@@ -1443,19 +1482,17 @@ class TestDatasetIndexingEstimateApi:
             patch(
                 "controllers.console.datasets.datasets.DocumentService.estimate_args_validate",
                 return_value=None,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: None),
             ),
         ):
             with pytest.raises(NotFound):
                 method(api, "tenant-1")
 
-    def test_post_llm_bad_request_error(self, app: Flask):
+    def test_post_llm_bad_request_error(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetIndexingEstimateApi()
         method = unwrap(api.post)
         mock_file = self._upload_file()
+        dataset_db_session.add(mock_file)
+        dataset_db_session.commit()
 
         payload = self._base_payload()
 
@@ -1470,10 +1507,6 @@ class TestDatasetIndexingEstimateApi:
             patch(
                 "controllers.console.datasets.datasets.DocumentService.estimate_args_validate",
                 return_value=None,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: [mock_file]),
             ),
             patch(
                 "controllers.console.datasets.datasets.IndexingRunner.indexing_estimate",
@@ -1483,10 +1516,12 @@ class TestDatasetIndexingEstimateApi:
             with pytest.raises(ProviderNotInitializeError):
                 method(api, "tenant-1")
 
-    def test_post_provider_token_not_init(self, app: Flask):
+    def test_post_provider_token_not_init(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetIndexingEstimateApi()
         method = unwrap(api.post)
         mock_file = self._upload_file()
+        dataset_db_session.add(mock_file)
+        dataset_db_session.commit()
 
         payload = self._base_payload()
 
@@ -1501,10 +1536,6 @@ class TestDatasetIndexingEstimateApi:
             patch(
                 "controllers.console.datasets.datasets.DocumentService.estimate_args_validate",
                 return_value=None,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: [mock_file]),
             ),
             patch(
                 "controllers.console.datasets.datasets.IndexingRunner.indexing_estimate",
@@ -1514,10 +1545,12 @@ class TestDatasetIndexingEstimateApi:
             with pytest.raises(ProviderNotInitializeError):
                 method(api, "tenant-1")
 
-    def test_post_generic_exception(self, app: Flask):
+    def test_post_generic_exception(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetIndexingEstimateApi()
         method = unwrap(api.post)
         mock_file = self._upload_file()
+        dataset_db_session.add(mock_file)
+        dataset_db_session.commit()
 
         payload = self._base_payload()
 
@@ -1532,10 +1565,6 @@ class TestDatasetIndexingEstimateApi:
             patch(
                 "controllers.console.datasets.datasets.DocumentService.estimate_args_validate",
                 return_value=None,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: [mock_file]),
             ),
             patch(
                 "controllers.console.datasets.datasets.IndexingRunner.indexing_estimate",
@@ -1680,33 +1709,15 @@ class TestDatasetRelatedAppListApi:
 
 
 class TestDatasetIndexingStatusApi:
-    def test_get_success_with_documents(self, app: Flask):
+    def test_get_success_with_documents(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetIndexingStatusApi()
         method = unwrap(api.get)
 
-        document = MagicMock()
-        document.id = "doc-1"
-        document.indexing_status = "completed"
-        document.processing_started_at = None
-        document.parsing_completed_at = None
-        document.cleaning_completed_at = None
-        document.splitting_completed_at = None
-        document.completed_at = None
-        document.paused_at = None
-        document.error = None
-        document.stopped_at = None
+        document = make_document_status()
+        dataset_db_session.add_all([document, *(make_segment(i, completed=True) for i in range(1, 4))])
+        dataset_db_session.commit()
 
-        with (
-            app.test_request_context("/"),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: [document]),
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalar",
-                return_value=3,
-            ),
-        ):
+        with app.test_request_context("/"):
             response, status = method(api, "tenant-1", "dataset-1")
 
         assert status == 200
@@ -1717,49 +1728,26 @@ class TestDatasetIndexingStatusApi:
         assert item["completed_segments"] == 3
         assert item["total_segments"] == 3
 
-    def test_get_success_no_documents(self, app: Flask):
+    def test_get_success_no_documents(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetIndexingStatusApi()
         method = unwrap(api.get)
 
-        with (
-            app.test_request_context("/"),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: []),
-            ),
-        ):
+        with app.test_request_context("/"):
             response, status = method(api, "tenant-1", "dataset-1")
 
         assert status == 200
         assert response == {"data": []}
 
-    def test_segment_counts_different_values(self, app: Flask):
+    def test_segment_counts_different_values(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetIndexingStatusApi()
         method = unwrap(api.get)
 
-        document = MagicMock()
-        document.id = "doc-1"
-        document.indexing_status = "indexing"
-        document.processing_started_at = None
-        document.parsing_completed_at = None
-        document.cleaning_completed_at = None
-        document.splitting_completed_at = None
-        document.completed_at = None
-        document.paused_at = None
-        document.error = None
-        document.stopped_at = None
+        document = make_document_status(indexing_status=IndexingStatus.INDEXING)
+        segments = [make_segment(i, completed=i <= 2) for i in range(1, 6)]
+        dataset_db_session.add_all([document, *segments])
+        dataset_db_session.commit()
 
-        with (
-            app.test_request_context("/"),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: [document]),
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalar",
-                side_effect=[2, 5],
-            ),
-        ):
+        with app.test_request_context("/"):
             response, status = method(api, "tenant-1", "dataset-1")
 
         assert status == 200
@@ -1769,30 +1757,14 @@ class TestDatasetIndexingStatusApi:
 
 
 class TestDatasetApiKeyApi:
-    def test_get_api_keys_success(self, app: Flask):
+    def test_get_api_keys_success(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetApiKeyApi()
         method = unwrap(api.get)
 
-        mock_key_1 = MagicMock(spec=ApiToken)
-        mock_key_1.id = "key-1"
-        mock_key_1.type = "dataset"
-        mock_key_1.token = "ds-abc"
-        mock_key_1.last_used_at = None
-        mock_key_1.created_at = None
-        mock_key_2 = MagicMock(spec=ApiToken)
-        mock_key_2.id = "key-2"
-        mock_key_2.type = "dataset"
-        mock_key_2.token = "ds-def"
-        mock_key_2.last_used_at = None
-        mock_key_2.created_at = None
+        dataset_db_session.add_all([make_api_token("key-1", token="ds-abc"), make_api_token("key-2", token="ds-def")])
+        dataset_db_session.commit()
 
-        with (
-            app.test_request_context("/"),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalars",
-                return_value=MagicMock(all=lambda: [mock_key_1, mock_key_2]),
-            ),
-        ):
+        with app.test_request_context("/"):
             response = method(api, "tenant-1")
 
         assert "data" in response
@@ -1802,58 +1774,33 @@ class TestDatasetApiKeyApi:
         assert response["data"][1]["id"] == "key-2"
         assert response["data"][1]["token"] == "ds-def"
 
-    def test_post_create_api_key_success(self, app: Flask):
+    def test_post_create_api_key_success(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetApiKeyApi()
         method = unwrap(api.post)
 
-        mock_token = MagicMock()
-        mock_token.id = "new-key-id"
-        mock_token.last_used_at = None
-        mock_token.created_at = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.UTC)
-
-        mock_api_token_cls = MagicMock()
-        mock_api_token_cls.return_value = mock_token
-        mock_api_token_cls.generate_api_key.return_value = "dataset-abc123"
-
         with (
             app.test_request_context("/"),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalar",
-                return_value=3,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.ApiToken",
-                mock_api_token_cls,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.add",
-                return_value=None,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.commit",
-                return_value=None,
-            ),
+            patch.object(ApiToken, "generate_api_key", return_value="dataset-abc123"),
         ):
             response, status = method(api, "tenant-1")
 
         assert status == 200
         assert isinstance(response, dict)
-        assert response["id"] == "new-key-id"
         assert response["token"] == "dataset-abc123"
         assert response["type"] == "dataset"
         assert response["created_at"] is not None
+        stored = dataset_db_session.get(ApiToken, response["id"])
+        assert stored is not None
+        assert stored.tenant_id == "tenant-1"
 
-    def test_post_exceed_max_keys(self, app: Flask):
+    def test_post_exceed_max_keys(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetApiKeyApi()
         method = unwrap(api.post)
 
-        with (
-            app.test_request_context("/"),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalar",
-                return_value=10,
-            ),
-        ):
+        dataset_db_session.add_all([make_api_token(f"key-{i}", token=f"dataset-{i}") for i in range(10)])
+        dataset_db_session.commit()
+
+        with app.test_request_context("/"):
             with pytest.raises(BadRequest) as exc_info:
                 method(api, "tenant-1")
 
@@ -1865,43 +1812,29 @@ class TestDatasetApiKeyApi:
 
 
 class TestDatasetApiDeleteApi:
-    def test_delete_success(self, app: Flask):
+    def test_delete_success(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetApiDeleteApi()
         method = unwrap(api.delete)
 
-        mock_key = MagicMock()
+        key = make_api_token("api-key-id", token="dataset-delete")
+        dataset_db_session.add(key)
+        dataset_db_session.commit()
 
         with (
             app.test_request_context("/"),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalar",
-                return_value=mock_key,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.commit",
-                return_value=None,
-            ),
-            patch(
-                "controllers.console.datasets.datasets.db.session.delete",
-                return_value=None,
-            ),
+            patch("controllers.console.datasets.datasets.ApiTokenCache.delete"),
         ):
             response, status = method(api, "tenant-1", "api-key-id")
 
         assert status == 204
         assert response == ""
+        assert dataset_db_session.get(ApiToken, "api-key-id") is None
 
-    def test_delete_key_not_found(self, app: Flask):
+    def test_delete_key_not_found(self, app: Flask, dataset_db_session: scoped_session[Session]):
         api = DatasetApiDeleteApi()
         method = unwrap(api.delete)
 
-        with (
-            app.test_request_context("/"),
-            patch(
-                "controllers.console.datasets.datasets.db.session.scalar",
-                return_value=None,
-            ),
-        ):
+        with app.test_request_context("/"):
             with pytest.raises(NotFound):
                 method(api, "tenant-1", "api-key-id")
 

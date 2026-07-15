@@ -11,15 +11,21 @@ This test suite covers:
 
 import json
 import pickle
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session
 
 from core.rag.index_processor.constant.index_type import IndexTechniqueType
 from extensions.storage.storage_type import StorageType
+from models import dataset as dataset_module
+from models.base import TypeBase
 from models.dataset import (
     AppDatasetJoin,
     ChildChunk,
@@ -29,7 +35,9 @@ from models.dataset import (
     Document,
     DocumentSegment,
     Embedding,
+    ExternalKnowledgeApis,
     ExternalKnowledgeBindings,
+    SegmentAttachmentBinding,
 )
 from models.enums import (
     CreatorUserRole,
@@ -40,6 +48,32 @@ from models.enums import (
     SegmentStatus,
 )
 from models.model import UploadFile
+
+
+@dataclass(frozen=True)
+class Database:
+    """Typed SQLite binding used by model properties that query ORM state."""
+
+    engine: Engine
+    session: Session
+
+
+@pytest.fixture
+def database(sqlite_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[Database]:
+    TypeBase.metadata.create_all(
+        sqlite_engine,
+        tables=[
+            Dataset.__table__,
+            ExternalKnowledgeApis.__table__,
+            ExternalKnowledgeBindings.__table__,
+            UploadFile.__table__,
+            SegmentAttachmentBinding.__table__,
+        ],
+    )
+    with Session(sqlite_engine, expire_on_commit=False) as session:
+        database = Database(engine=sqlite_engine, session=session)
+        monkeypatch.setattr(dataset_module, "db", database)
+        yield database
 
 
 class TestDatasetModelValidation:
@@ -187,23 +221,71 @@ class TestDatasetModelValidation:
         assert result["top_k"] == 2
         assert result["score_threshold"] == 0.0
 
-    def test_dataset_external_knowledge_info_returns_none_for_cross_tenant_template(self):
+    def test_dataset_external_knowledge_info_returns_none_for_cross_tenant_template(self, database: Database):
         """Test external datasets fail closed when the bound template is outside the tenant."""
         dataset = Dataset(
-            tenant_id=str(uuid4()),
+            tenant_id="tenant-1",
             name="External Dataset",
             data_source_type=DataSourceType.UPLOAD_FILE,
-            created_by=str(uuid4()),
+            created_by="account-1",
             provider="external",
         )
-        binding = Mock(spec=ExternalKnowledgeBindings)
-        binding.external_knowledge_id = "knowledge-1"
-        binding.external_knowledge_api_id = str(uuid4())
+        dataset.id = "dataset-1"
+        knowledge_api = ExternalKnowledgeApis(
+            name="Other tenant API",
+            description="Must not be visible",
+            tenant_id="tenant-2",
+            settings=json.dumps({"endpoint": "https://other.example.com"}),
+            created_by="account-2",
+            updated_by=None,
+        )
+        knowledge_api.id = "api-1"
+        binding = ExternalKnowledgeBindings(
+            tenant_id="tenant-1",
+            external_knowledge_api_id=knowledge_api.id,
+            dataset_id=dataset.id,
+            external_knowledge_id="knowledge-1",
+            created_by="account-1",
+        )
+        database.session.add_all([dataset, knowledge_api, binding])
+        database.session.commit()
 
-        with patch("models.dataset.db") as mock_db:
-            mock_db.session.scalar.side_effect = [binding, None]
+        assert dataset.external_knowledge_info is None
 
-            assert dataset.external_knowledge_info is None
+    def test_dataset_external_knowledge_info_uses_same_tenant_template(self, database: Database):
+        dataset = Dataset(
+            tenant_id="tenant-1",
+            name="External Dataset",
+            data_source_type=DataSourceType.UPLOAD_FILE,
+            created_by="account-1",
+            provider="external",
+        )
+        dataset.id = "dataset-1"
+        knowledge_api = ExternalKnowledgeApis(
+            name="Knowledge API",
+            description="Tenant-scoped retrieval API",
+            tenant_id=dataset.tenant_id,
+            settings=json.dumps({"endpoint": "https://knowledge.example.com"}),
+            created_by="account-1",
+            updated_by=None,
+        )
+        knowledge_api.id = "api-1"
+        binding = ExternalKnowledgeBindings(
+            tenant_id=dataset.tenant_id,
+            external_knowledge_api_id=knowledge_api.id,
+            dataset_id=dataset.id,
+            external_knowledge_id="knowledge-1",
+            created_by="account-1",
+        )
+        database.session.add_all([dataset, knowledge_api, binding])
+        database.session.commit()
+
+        assert dataset.external_knowledge_info == {
+            "external_knowledge_id": "knowledge-1",
+            "external_knowledge_api_id": "api-1",
+            "external_knowledge_api_name": "Knowledge API",
+            "external_knowledge_api_endpoint": "https://knowledge.example.com",
+        }
 
     def test_dataset_retrieval_model_dict_property(self):
         """Test retrieval_model_dict property with default values."""
@@ -707,7 +789,11 @@ class TestDocumentSegmentIndexing:
         # Assert
         assert segment.hit_count == 5
 
-    def test_document_segment_attachments_prefers_files_url_for_source_url(self, monkeypatch: pytest.MonkeyPatch):
+    def test_document_segment_attachments_prefers_files_url_for_source_url(
+        self,
+        database: Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         """Test attachment source URLs use FILES_URL before falling back to CONSOLE_API_URL."""
         # Arrange
         segment = DocumentSegment(
@@ -735,6 +821,36 @@ class TestDocumentSegmentIndexing:
             used=False,
         )
         attachment.id = "upload-1"
+        binding = SegmentAttachmentBinding(
+            tenant_id=segment.tenant_id,
+            dataset_id=segment.dataset_id,
+            document_id=segment.document_id,
+            segment_id=segment.id,
+            attachment_id=attachment.id,
+        )
+        other_attachment = UploadFile(
+            tenant_id="tenant-2",
+            storage_type=StorageType.LOCAL,
+            key="upload-2-key",
+            name="hidden.png",
+            size=64,
+            extension="png",
+            mime_type="image/png",
+            created_by_role=CreatorUserRole.ACCOUNT,
+            created_by="user-2",
+            created_at=datetime(2023, 11, 14, tzinfo=UTC),
+            used=False,
+        )
+        other_attachment.id = "upload-2"
+        other_binding = SegmentAttachmentBinding(
+            tenant_id="tenant-2",
+            dataset_id=segment.dataset_id,
+            document_id=segment.document_id,
+            segment_id=segment.id,
+            attachment_id=other_attachment.id,
+        )
+        database.session.add_all([attachment, binding, other_attachment, other_binding])
+        database.session.commit()
 
         monkeypatch.setattr("models.dataset.time.time", lambda: 1700000000)
         monkeypatch.setattr("models.dataset.os.urandom", lambda _: b"\x01" * 16)
@@ -742,11 +858,7 @@ class TestDocumentSegmentIndexing:
         monkeypatch.setattr("models.dataset.dify_config.FILES_URL", "https://files.example.com")
         monkeypatch.setattr("models.dataset.dify_config.CONSOLE_API_URL", "https://console.example.com")
 
-        with patch("models.dataset.db") as mock_db:
-            mock_db.session.execute.return_value.all.return_value = [(Mock(), attachment)]
-
-            # Act
-            attachments = segment.attachments
+        attachments = segment.attachments
 
         # Assert
         assert len(attachments) == 1
@@ -758,6 +870,21 @@ class TestDocumentSegmentIndexing:
         assert query["timestamp"] == ["1700000000"]
         assert query["nonce"] == ["01010101010101010101010101010101"]
         assert query["sign"][0]
+
+    def test_document_segment_attachments_returns_empty_for_unbound_segment(self, database: Database):
+        segment = DocumentSegment(
+            tenant_id="tenant-1",
+            dataset_id="dataset-1",
+            document_id="document-1",
+            position=1,
+            content="Test",
+            word_count=1,
+            tokens=2,
+            created_by="user-1",
+        )
+        segment.id = "segment-1"
+
+        assert segment.attachments == []
 
     def test_document_segment_error_tracking(self):
         """Test document segment error tracking."""

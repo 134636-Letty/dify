@@ -1,11 +1,14 @@
 import inspect
 import logging
+from collections.abc import Iterator
 from http import HTTPStatus
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
 from flask import Flask
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from werkzeug.datastructures import FileStorage
 from werkzeug.exceptions import Unauthorized
 
@@ -34,6 +37,17 @@ from controllers.console.workspace.workspace import (
 from enums.cloud_plan import CloudPlan
 from libs.datetime_utils import naive_utc_now
 from models.account import Account, Tenant, TenantCustomConfigDict, TenantStatus
+
+
+@pytest.fixture
+def workspace_session(sqlite_engine: Engine) -> Iterator[scoped_session[Session]]:
+    """Provide the callable scoped session expected by Flask-SQLAlchemy controllers."""
+    Tenant.metadata.create_all(sqlite_engine, tables=[Tenant.__table__])
+    session = scoped_session(sessionmaker(bind=sqlite_engine, expire_on_commit=False))
+    try:
+        yield session
+    finally:
+        session.remove()
 
 
 def make_account(account_id: str = "u1") -> Account:
@@ -427,23 +441,24 @@ class TestTenantInfoResponse:
 
 
 class TestSwitchWorkspaceApi:
-    def test_switch_success(self, app: Flask):
+    def test_switch_success(self, app: Flask, workspace_session: scoped_session[Session]):
         api = SwitchWorkspaceApi()
         method = inspect.unwrap(api.post)
 
         payload = {"tenant_id": "t2"}
         tenant = make_tenant("t2")
+        workspace_session.add(tenant)
+        workspace_session.commit()
         user = make_account()
 
         with (
             app.test_request_context("/workspaces/switch", json=payload),
             patch("controllers.console.workspace.workspace.TenantService.switch_tenant"),
-            patch("controllers.console.workspace.workspace.db.session.get") as get_mock,
+            patch("controllers.console.workspace.workspace.db.session", workspace_session),
             patch(
                 "controllers.console.workspace.workspace.WorkspaceService.get_tenant_info", return_value={"id": "t2"}
             ),
         ):
-            get_mock.return_value = tenant
             result = method(api, user)
 
         assert result["result"] == "success"
@@ -462,7 +477,7 @@ class TestSwitchWorkspaceApi:
             with pytest.raises(AccountNotLinkTenantError):
                 method(api, user)
 
-    def test_switch_tenant_not_found(self, app: Flask):
+    def test_switch_tenant_not_found(self, app: Flask, workspace_session: scoped_session[Session]):
         api = SwitchWorkspaceApi()
         method = inspect.unwrap(api.post)
 
@@ -472,27 +487,27 @@ class TestSwitchWorkspaceApi:
         with (
             app.test_request_context("/workspaces/switch", json=payload),
             patch("controllers.console.workspace.workspace.TenantService.switch_tenant"),
-            patch("controllers.console.workspace.workspace.db.session.get") as get_mock,
+            patch("controllers.console.workspace.workspace.db.session", workspace_session),
         ):
-            get_mock.return_value = None
-
             with pytest.raises(ValueError):
                 method(api, user)
 
 
 class TestCustomConfigWorkspaceApi:
-    def test_post_success(self, app: Flask):
+    def test_post_success(self, app: Flask, workspace_session: scoped_session[Session]):
         api = CustomConfigWorkspaceApi()
         method = inspect.unwrap(api.post)
 
         tenant = make_tenant(custom_config={})
+        workspace_session.add(tenant)
+        workspace_session.commit()
 
         payload = {"remove_webapp_brand": True}
 
         with (
             app.test_request_context("/workspaces/custom-config", json=payload),
             patch("controllers.console.workspace.workspace.db.get_or_404", return_value=tenant),
-            patch("controllers.console.workspace.workspace.db.session.commit"),
+            patch("controllers.console.workspace.workspace.db.session", workspace_session),
             patch(
                 "controllers.console.workspace.workspace.WorkspaceService.get_tenant_info", return_value={"id": "t1"}
             ),
@@ -501,11 +516,13 @@ class TestCustomConfigWorkspaceApi:
 
         assert result["result"] == "success"
 
-    def test_logo_fallback(self, app: Flask):
+    def test_logo_fallback(self, app: Flask, workspace_session: scoped_session[Session]):
         api = CustomConfigWorkspaceApi()
         method = inspect.unwrap(api.post)
 
         tenant = make_tenant(custom_config={"replace_webapp_logo": "old-logo"})
+        workspace_session.add(tenant)
+        workspace_session.commit()
 
         payload = {"remove_webapp_brand": False}
 
@@ -515,7 +532,7 @@ class TestCustomConfigWorkspaceApi:
                 "controllers.console.workspace.workspace.db.get_or_404",
                 return_value=tenant,
             ),
-            patch("controllers.console.workspace.workspace.db.session.commit"),
+            patch("controllers.console.workspace.workspace.db.session", workspace_session),
             patch(
                 "controllers.console.workspace.workspace.WorkspaceService.get_tenant_info",
                 return_value={"id": "t1"},
@@ -666,18 +683,20 @@ class TestWebappLogoWorkspaceApi:
 
 
 class TestWorkspaceInfoApi:
-    def test_post_success(self, app: Flask):
+    def test_post_success(self, app: Flask, workspace_session: scoped_session[Session]):
         api = WorkspaceInfoApi()
         method = inspect.unwrap(api.post)
 
         tenant = make_tenant()
+        workspace_session.add(tenant)
+        workspace_session.commit()
 
         payload = {"name": "New Name"}
 
         with (
             app.test_request_context("/workspaces/info", json=payload),
             patch("controllers.console.workspace.workspace.db.get_or_404", return_value=tenant),
-            patch("controllers.console.workspace.workspace.db.session.commit"),
+            patch("controllers.console.workspace.workspace.db.session", workspace_session),
             patch(
                 "controllers.console.workspace.workspace.WorkspaceService.get_tenant_info",
                 return_value={"id": "t1", "name": "New Name"},

@@ -1,9 +1,11 @@
-from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 
+from core.app.apps.chat import app_runner as app_runner_module
 from core.app.apps.chat.app_generator import ChatAppGenerator
 from core.app.apps.chat.app_runner import ChatAppRunner
 from core.app.apps.exc import GenerateTaskStoppedError
@@ -11,7 +13,7 @@ from core.app.entities.app_invoke_entities import InvokeFrom
 from core.app.entities.queue_entities import QueueAnnotationReplyEvent
 from core.moderation.base import ModerationError
 from graphon.model_runtime.errors.invoke import InvokeAuthorizationError
-from models.model import AppMode
+from models.model import App, AppMode
 
 
 class DummyGenerateEntity:
@@ -30,25 +32,46 @@ class DummyQueueManager:
         self.published.append((event, pub_from))
 
 
-@contextmanager
-def patched_create_session(*, return_value=None, side_effect=None):
-    session = MagicMock()
-    if side_effect is not None:
-        session.scalar.side_effect = side_effect
-    else:
-        session.scalar.return_value = return_value
-    session_context = MagicMock()
-    session_context.__enter__.return_value = session
-    with patch("core.app.apps.chat.app_runner.create_session", return_value=session_context):
-        yield session
+@pytest.fixture
+def orm_session(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_engine: Engine,
+    sqlite_session: Session,
+) -> Session:
+    """Use SQLite for both caller-owned and runner-owned ORM sessions."""
+    monkeypatch.setattr(
+        app_runner_module,
+        "create_session",
+        sessionmaker(bind=sqlite_engine, expire_on_commit=False),
+    )
+    return sqlite_session
+
+
+def _persist_app(session: Session, *, app_id: str = "app-1", tenant_id: str = "tenant-1") -> App:
+    app = App(
+        id=app_id,
+        tenant_id=tenant_id,
+        name="Chat App",
+        description="",
+        mode=AppMode.CHAT,
+        enable_site=False,
+        enable_api=False,
+        max_active_requests=None,
+    )
+    session.add(app)
+    session.commit()
+    return app
+
+
+pytestmark = pytest.mark.parametrize("sqlite_session", [(App,)], indirect=True)
 
 
 class TestChatAppGenerator:
-    def test_generate_requires_query(self):
+    def test_generate_requires_query(self, orm_session: Session):
         generator = ChatAppGenerator()
         with pytest.raises(ValueError):
             generator.generate(
-                session=MagicMock(),
+                session=orm_session,
                 app_model=SimpleNamespace(),
                 user=SimpleNamespace(),
                 args={"inputs": {}},
@@ -56,11 +79,11 @@ class TestChatAppGenerator:
                 streaming=False,
             )
 
-    def test_generate_rejects_non_string_query(self):
+    def test_generate_rejects_non_string_query(self, orm_session: Session):
         generator = ChatAppGenerator()
         with pytest.raises(ValueError):
             generator.generate(
-                session=MagicMock(),
+                session=orm_session,
                 app_model=SimpleNamespace(),
                 user=SimpleNamespace(),
                 args={"query": 1, "inputs": {}},
@@ -68,7 +91,7 @@ class TestChatAppGenerator:
                 streaming=False,
             )
 
-    def test_generate_debugger_overrides_model_config(self):
+    def test_generate_debugger_overrides_model_config(self, orm_session: Session):
         generator = ChatAppGenerator()
         app_model = SimpleNamespace(id="app-1", tenant_id="tenant-1")
         user = SimpleNamespace(id="user-1", session_id="session-1")
@@ -107,12 +130,12 @@ class TestChatAppGenerator:
             patch("core.app.apps.chat.app_generator.threading.Thread") as mock_thread,
         ):
             mock_thread.return_value.start.return_value = None
-            result = generator.generate(MagicMock(), app_model, user, args, InvokeFrom.DEBUGGER, streaming=False)
+            result = generator.generate(orm_session, app_model, user, args, InvokeFrom.DEBUGGER, streaming=False)
 
         assert result == {"ok": True}
         assert generate_entity.call_args.kwargs["extras"]["trace_session_id"] == "session-1"
 
-    def test_generate_rejects_model_config_override_for_non_debugger(self):
+    def test_generate_rejects_model_config_override_for_non_debugger(self, orm_session: Session):
         generator = ChatAppGenerator()
         with pytest.raises(ValueError):
             with (
@@ -121,7 +144,7 @@ class TestChatAppGenerator:
                 ),
             ):
                 generator.generate(
-                    session=MagicMock(),
+                    session=orm_session,
                     app_model=SimpleNamespace(tenant_id="t1", id="a1", mode=AppMode.CHAT.value),
                     user=SimpleNamespace(id="u1", session_id="s1"),
                     args={"query": "hi", "inputs": {}, "model_config": {"foo": "bar"}},
@@ -129,7 +152,7 @@ class TestChatAppGenerator:
                     streaming=False,
                 )
 
-    def test_generate_worker_handles_exceptions(self):
+    def test_generate_worker_handles_exceptions(self, orm_session: Session):
         generator = ChatAppGenerator()
         queue_manager = DummyQueueManager()
         entity = DummyGenerateEntity(task_id="t1", user_id="u1")
@@ -142,7 +165,7 @@ class TestChatAppGenerator:
         ):
             generator._generate_worker(
                 flask_app=Mock(app_context=Mock(return_value=Mock(__enter__=Mock(), __exit__=Mock()))),
-                session=MagicMock(),
+                session=orm_session,
                 application_generate_entity=entity,
                 queue_manager=queue_manager,
                 conversation_id="c1",
@@ -159,7 +182,7 @@ class TestChatAppGenerator:
         ):
             generator._generate_worker(
                 flask_app=Mock(app_context=Mock(return_value=Mock(__enter__=Mock(), __exit__=Mock()))),
-                session=MagicMock(),
+                session=orm_session,
                 application_generate_entity=entity,
                 queue_manager=queue_manager,
                 conversation_id="c1",
@@ -168,7 +191,7 @@ class TestChatAppGenerator:
 
 
 class TestChatAppRunner:
-    def test_run_raises_when_app_missing(self):
+    def test_run_raises_when_app_missing(self, orm_session: Session):
         runner = ChatAppRunner()
         app_config = SimpleNamespace(
             app_id="app-1", tenant_id="tenant-1", prompt_template=None, external_data_variables=[]
@@ -186,13 +209,12 @@ class TestChatAppRunner:
             invoke_from=InvokeFrom.SERVICE_API,
         )
 
-        with patched_create_session(return_value=None):
-            with pytest.raises(ValueError):
-                runner.run(
-                    MagicMock(), app_generate_entity, DummyQueueManager(), SimpleNamespace(), SimpleNamespace(id="m1")
-                )
+        with pytest.raises(ValueError):
+            runner.run(
+                orm_session, app_generate_entity, DummyQueueManager(), SimpleNamespace(), SimpleNamespace(id="m1")
+            )
 
-    def test_run_moderation_error_direct_output(self):
+    def test_run_moderation_error_direct_output(self, orm_session: Session):
         runner = ChatAppRunner()
         app_config = SimpleNamespace(
             app_id="app-1",
@@ -215,19 +237,19 @@ class TestChatAppRunner:
             invoke_from=InvokeFrom.SERVICE_API,
         )
 
+        _persist_app(orm_session)
         with (
-            patched_create_session(return_value=SimpleNamespace(id="app-1", tenant_id="tenant-1")),
             patch.object(ChatAppRunner, "organize_prompt_messages", return_value=([], [])),
             patch.object(ChatAppRunner, "moderation_for_inputs", side_effect=ModerationError("blocked")),
             patch.object(ChatAppRunner, "direct_output") as mock_direct,
         ):
             runner.run(
-                MagicMock(), app_generate_entity, DummyQueueManager(), SimpleNamespace(), SimpleNamespace(id="m1")
+                orm_session, app_generate_entity, DummyQueueManager(), SimpleNamespace(), SimpleNamespace(id="m1")
             )
 
         mock_direct.assert_called_once()
 
-    def test_run_annotation_reply_short_circuits(self):
+    def test_run_annotation_reply_short_circuits(self, orm_session: Session):
         runner = ChatAppRunner()
         app_config = SimpleNamespace(
             app_id="app-1",
@@ -252,20 +274,20 @@ class TestChatAppRunner:
 
         annotation = SimpleNamespace(id="ann-1", content="answer")
 
+        _persist_app(orm_session)
         with (
-            patched_create_session(return_value=SimpleNamespace(id="app-1", tenant_id="tenant-1")),
             patch.object(ChatAppRunner, "organize_prompt_messages", return_value=([], [])),
             patch.object(ChatAppRunner, "moderation_for_inputs", return_value=(None, {}, "hi")),
             patch.object(ChatAppRunner, "query_app_annotations_to_reply", return_value=annotation),
             patch.object(ChatAppRunner, "direct_output") as mock_direct,
         ):
             queue_manager = DummyQueueManager()
-            runner.run(MagicMock(), app_generate_entity, queue_manager, SimpleNamespace(), SimpleNamespace(id="m1"))
+            runner.run(orm_session, app_generate_entity, queue_manager, SimpleNamespace(), SimpleNamespace(id="m1"))
 
         assert any(isinstance(item[0], QueueAnnotationReplyEvent) for item in queue_manager.published)
         mock_direct.assert_called_once()
 
-    def test_run_returns_when_hosting_moderation_blocks(self):
+    def test_run_returns_when_hosting_moderation_blocks(self, orm_session: Session):
         runner = ChatAppRunner()
         app_config = SimpleNamespace(
             app_id="app-1",
@@ -288,18 +310,18 @@ class TestChatAppRunner:
             invoke_from=InvokeFrom.SERVICE_API,
         )
 
+        _persist_app(orm_session)
         with (
-            patched_create_session(return_value=SimpleNamespace(id="app-1", tenant_id="tenant-1")),
             patch.object(ChatAppRunner, "organize_prompt_messages", return_value=([], [])),
             patch.object(ChatAppRunner, "moderation_for_inputs", return_value=(None, {}, "hi")),
             patch.object(ChatAppRunner, "query_app_annotations_to_reply", return_value=None),
             patch.object(ChatAppRunner, "check_hosting_moderation", return_value=True),
         ):
             runner.run(
-                MagicMock(), app_generate_entity, DummyQueueManager(), SimpleNamespace(), SimpleNamespace(id="m1")
+                orm_session, app_generate_entity, DummyQueueManager(), SimpleNamespace(), SimpleNamespace(id="m1")
             )
 
-    def test_run_closes_scoped_session_before_stream_consumption(self):
+    def test_run_closes_scoped_session_before_stream_consumption(self, orm_session: Session):
         runner = ChatAppRunner()
         app_config = SimpleNamespace(
             app_id="app-1",
@@ -334,8 +356,8 @@ class TestChatAppRunner:
             events.append("invoke")
             return invoke_stream()
 
+        _persist_app(orm_session)
         with (
-            patched_create_session(return_value=SimpleNamespace(id="app-1", tenant_id="tenant-1")),
             patch.object(ChatAppRunner, "organize_prompt_messages", return_value=([], [])),
             patch.object(ChatAppRunner, "moderation_for_inputs", return_value=(None, {}, "hi")),
             patch.object(ChatAppRunner, "query_app_annotations_to_reply", return_value=None),
@@ -350,7 +372,7 @@ class TestChatAppRunner:
             patch("core.app.apps.chat.app_runner.db.session.close", side_effect=lambda: events.append("close")),
         ):
             model_instance.invoke_llm.side_effect = invoke_llm
-            runner.run(MagicMock(), app_generate_entity, queue_manager, SimpleNamespace(), SimpleNamespace(id="m1"))
+            runner.run(orm_session, app_generate_entity, queue_manager, SimpleNamespace(), SimpleNamespace(id="m1"))
 
         assert events == ["close", "invoke", "first-chunk"]
         mock_handle.assert_called_once_with(

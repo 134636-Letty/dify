@@ -1,152 +1,292 @@
-"""Unit tests for the ``resume_agent_app_execution`` celery task (ENG-635).
+"""Unit tests for resuming an Agent App after human-input submission.
 
-Every DB access (``db.session.get``) and the generator are patched at the module
-level, so the task's branch logic is exercised without a database or live stack.
+The task reads a runtime form, app, conversation, and user through the scoped
+application session.  Account resolution also opens a model-owned session to
+load tenant membership.  These tests bind both paths to SQLite and persist the
+complete lookup graph; only the Agent App generator remains an external-boundary
+mock.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import datetime
+from collections.abc import Iterator
+from dataclasses import dataclass
+from unittest.mock import Mock
+from uuid import uuid4
 
-from pytest_mock import MockerFixture
+import pytest
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from core.app.entities.app_invoke_entities import InvokeFrom
-from models.account import Account
+from core.workflow.nodes.human_input.enums import HumanInputFormKind, HumanInputFormStatus
+from models.account import Account, Tenant, TenantAccountJoin, TenantAccountRole
+from models.base import TypeBase
+from models.enums import ConversationFromSource, EndUserType
 from models.human_input import HumanInputForm
-from models.model import App, Conversation, EndUser
+from models.model import App, AppMode, Conversation, EndUser
 from tasks.app_generate import resume_agent_app_task as mod
 
 MODULE = "tasks.app_generate.resume_agent_app_task"
 
 
-def _form(conversation_id: str = "conv-1", app_id: str = "app-1") -> MagicMock:
-    return MagicMock(conversation_id=conversation_id, app_id=app_id)
+@dataclass(frozen=True)
+class _ScopedDatabaseBinding:
+    session: scoped_session[Session]
 
 
-def _wire_db(
-    mocker: MockerFixture,
-    *,
-    form=None,
-    app=None,
-    conversation=None,
-    account=None,
-    end_user=None,
-) -> MagicMock:
-    """Patch the module ``db`` so ``db.session.get(Model, id)`` dispatches by model."""
-    table = {
-        HumanInputForm: form,
-        App: app,
-        Conversation: conversation,
-        Account: account,
-        EndUser: end_user,
-    }
-    db = mocker.patch(f"{MODULE}.db")
-    db.session.get.side_effect = lambda model, _id: table.get(model)
-    return db
+@dataclass(frozen=True)
+class _EngineDatabaseBinding:
+    engine: Engine
 
 
-def test_resume_happy_path_account_user_sets_tenant_and_runs(mocker: MockerFixture):
-    conversation = MagicMock(from_account_id="acct-1", from_end_user_id=None, invoke_from=InvokeFrom.WEB_APP)
-    account = MagicMock()
-    app = MagicMock(tenant_id="tenant-1")
-    _wire_db(mocker, form=_form(), app=app, conversation=conversation, account=account)
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
+@dataclass(frozen=True)
+class ResumeDatabase:
+    """Identifiers and real session handles for one resumable Agent App turn."""
 
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
+    session_maker: sessionmaker[Session]
+    registry: scoped_session[Session]
+    tenant_id: str
+    app_id: str
+    conversation_id: str
+    form_id: str
+    account_id: str
+    end_user_id: str
 
-    account.set_tenant_id.assert_called_once_with("tenant-1")
-    gen.return_value.resume_after_form_submission.assert_called_once()
-    kwargs = gen.return_value.resume_after_form_submission.call_args.kwargs
-    assert kwargs["conversation_id"] == "conv-1"
-    assert kwargs["user"] is account
-    assert kwargs["app_model"] is app
+    def delete(self, model: type[object], object_id: str) -> None:
+        with self.session_maker.begin() as session:
+            table = model.__table__  # type: ignore[attr-defined]
+            session.execute(table.delete().where(table.c.id == object_id))
+
+    def use_end_user(self) -> None:
+        with self.session_maker.begin() as session:
+            conversation = session.get_one(Conversation, self.conversation_id)
+            conversation.from_account_id = None
+            conversation.from_end_user_id = self.end_user_id
+
+    def remove_users(self) -> None:
+        with self.session_maker.begin() as session:
+            conversation = session.get_one(Conversation, self.conversation_id)
+            conversation.from_account_id = None
+            conversation.from_end_user_id = None
+
+
+@pytest.fixture
+def resume_db(sqlite_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[ResumeDatabase]:
+    """Persist the form ownership graph and explicitly bind both ORM session paths."""
+
+    tables = [
+        Tenant.__table__,
+        Account.__table__,
+        TenantAccountJoin.__table__,
+        App.__table__,
+        Conversation.__table__,
+        EndUser.__table__,
+        HumanInputForm.__table__,
+    ]
+    TypeBase.metadata.create_all(sqlite_engine, tables=tables)
+    maker = sessionmaker(bind=sqlite_engine, expire_on_commit=False)
+    registry = scoped_session(maker)
+    monkeypatch.setattr(mod, "db", _ScopedDatabaseBinding(session=registry))
+    monkeypatch.setattr("models.account.db", _EngineDatabaseBinding(engine=sqlite_engine))
+
+    tenant_id = str(uuid4())
+    app_id = str(uuid4())
+    conversation_id = str(uuid4())
+    form_id = str(uuid4())
+    account_id = str(uuid4())
+    end_user_id = str(uuid4())
+    with maker.begin() as session:
+        tenant = Tenant(name="Agent tenant")
+        tenant.id = tenant_id
+        account = Account(name="Agent owner", email="owner@example.com")
+        account.id = account_id
+        app = App(
+            id=app_id,
+            tenant_id=tenant_id,
+            name="Agent App",
+            description="runtime test app",
+            mode=AppMode.AGENT,
+            icon_type=None,
+            icon=None,
+            icon_background=None,
+            enable_site=True,
+            enable_api=True,
+            max_active_requests=None,
+            created_by=account_id,
+        )
+        conversation = Conversation(
+            id=conversation_id,
+            app_id=app_id,
+            mode=AppMode.AGENT,
+            name="Agent conversation",
+            status="normal",
+            invoke_from=InvokeFrom.WEB_APP,
+            from_source=ConversationFromSource.CONSOLE,
+            from_account_id=account_id,
+            from_end_user_id=None,
+        )
+        conversation._inputs = {}
+        end_user = EndUser(
+            id=end_user_id,
+            tenant_id=tenant_id,
+            app_id=app_id,
+            type=EndUserType.BROWSER,
+            name="Agent visitor",
+            is_anonymous=False,
+            session_id="browser-session",
+        )
+        form = HumanInputForm(
+            id=form_id,
+            tenant_id=tenant_id,
+            app_id=app_id,
+            workflow_run_id=None,
+            conversation_id=conversation_id,
+            form_kind=HumanInputFormKind.RUNTIME,
+            node_id="ask-human",
+            form_definition="{}",
+            rendered_content="Please answer",
+            status=HumanInputFormStatus.SUBMITTED,
+            expiration_time=datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1),
+        )
+        session.add_all(
+            [
+                tenant,
+                account,
+                TenantAccountJoin(
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    current=True,
+                    role=TenantAccountRole.OWNER,
+                ),
+                app,
+                conversation,
+                end_user,
+                form,
+            ]
+        )
+
+    database = ResumeDatabase(
+        session_maker=maker,
+        registry=registry,
+        tenant_id=tenant_id,
+        app_id=app_id,
+        conversation_id=conversation_id,
+        form_id=form_id,
+        account_id=account_id,
+        end_user_id=end_user_id,
+    )
+    try:
+        yield database
+    finally:
+        registry.remove()
+
+
+def _run(resume_db: ResumeDatabase, monkeypatch: pytest.MonkeyPatch) -> Mock:
+    generator = Mock()
+    monkeypatch.setattr(mod, "AgentAppGenerator", Mock(return_value=generator))
+    mod.resume_agent_app_execution(conversation_id=resume_db.conversation_id, form_id=resume_db.form_id)
+    return generator
+
+
+def test_resume_account_user_loads_tenant_membership_and_runs(
+    resume_db: ResumeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generator = _run(resume_db, monkeypatch)
+
+    kwargs = generator.resume_after_form_submission.call_args.kwargs
+    assert kwargs["conversation_id"] == resume_db.conversation_id
+    assert kwargs["app_model"].id == resume_db.app_id
+    assert isinstance(kwargs["user"], Account)
+    assert kwargs["user"].id == resume_db.account_id
+    assert kwargs["user"].current_tenant_id == resume_db.tenant_id
+    assert kwargs["user"].current_role == TenantAccountRole.OWNER
     assert kwargs["invoke_from"] == InvokeFrom.WEB_APP
 
 
-def test_resume_end_user_path(mocker: MockerFixture):
-    conversation = MagicMock(from_account_id=None, from_end_user_id="eu-1", invoke_from=InvokeFrom.WEB_APP)
-    end_user = MagicMock()
-    _wire_db(mocker, form=_form(), app=MagicMock(tenant_id="t"), conversation=conversation, end_user=end_user)
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
+def test_resume_end_user_path_uses_persisted_visitor(
+    resume_db: ResumeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resume_db.use_end_user()
 
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
+    kwargs = _run(resume_db, monkeypatch).resume_after_form_submission.call_args.kwargs
 
-    assert gen.return_value.resume_after_form_submission.call_args.kwargs["user"] is end_user
-
-
-def test_resume_preserves_debugger_invoke_from(mocker: MockerFixture):
-    conversation = MagicMock(from_account_id="acct-1", from_end_user_id=None, invoke_from=InvokeFrom.DEBUGGER)
-    account = MagicMock()
-    app = MagicMock(tenant_id="tenant-1")
-    _wire_db(mocker, form=_form(), app=app, conversation=conversation, account=account)
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
-
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
-
-    assert gen.return_value.resume_after_form_submission.call_args.kwargs["invoke_from"] == InvokeFrom.DEBUGGER
+    assert isinstance(kwargs["user"], EndUser)
+    assert kwargs["user"].id == resume_db.end_user_id
 
 
-def test_resume_returns_when_form_missing(mocker: MockerFixture):
-    _wire_db(mocker, form=None)
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
+def test_resume_preserves_debugger_invoke_from(resume_db: ResumeDatabase, monkeypatch: pytest.MonkeyPatch) -> None:
+    with resume_db.session_maker.begin() as session:
+        session.get_one(Conversation, resume_db.conversation_id).invoke_from = InvokeFrom.DEBUGGER
 
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
+    kwargs = _run(resume_db, monkeypatch).resume_after_form_submission.call_args.kwargs
 
-    gen.assert_not_called()
-
-
-def test_resume_returns_on_conversation_mismatch(mocker: MockerFixture):
-    _wire_db(mocker, form=_form(conversation_id="other-conv"))
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
-
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
-
-    gen.assert_not_called()
+    assert kwargs["invoke_from"] == InvokeFrom.DEBUGGER
 
 
-def test_resume_returns_when_app_missing(mocker: MockerFixture):
-    _wire_db(mocker, form=_form(), app=None)
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
+@pytest.mark.parametrize("missing_model", [HumanInputForm, App, Conversation])
+def test_resume_returns_when_required_runtime_row_is_missing(
+    resume_db: ResumeDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_model: type[object],
+) -> None:
+    ids = {
+        HumanInputForm: resume_db.form_id,
+        App: resume_db.app_id,
+        Conversation: resume_db.conversation_id,
+    }
+    resume_db.delete(missing_model, ids[missing_model])
 
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
+    generator = _run(resume_db, monkeypatch)
 
-    gen.assert_not_called()
-
-
-def test_resume_returns_when_conversation_missing(mocker: MockerFixture):
-    _wire_db(mocker, form=_form(), app=MagicMock(), conversation=None)
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
-
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
-
-    gen.assert_not_called()
-
-
-def test_resume_returns_when_no_user_resolvable(mocker: MockerFixture):
-    conversation = MagicMock(from_account_id=None, from_end_user_id=None, invoke_from=InvokeFrom.WEB_APP)
-    _wire_db(mocker, form=_form(), app=MagicMock(), conversation=conversation)
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
-
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
-
-    gen.assert_not_called()
+    generator.resume_after_form_submission.assert_not_called()
 
 
-def test_resume_returns_when_account_id_set_but_account_gone(mocker: MockerFixture):
-    conversation = MagicMock(from_account_id="acct-x", from_end_user_id=None, invoke_from=InvokeFrom.WEB_APP)
-    _wire_db(mocker, form=_form(), app=MagicMock(), conversation=conversation, account=None)
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
+def test_resume_returns_on_persisted_conversation_mismatch(
+    resume_db: ResumeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with resume_db.session_maker.begin() as session:
+        session.get_one(HumanInputForm, resume_db.form_id).conversation_id = str(uuid4())
 
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
+    generator = _run(resume_db, monkeypatch)
 
-    gen.assert_not_called()
+    generator.resume_after_form_submission.assert_not_called()
 
 
-def test_resume_swallows_generator_exception(mocker: MockerFixture):
-    conversation = MagicMock(from_account_id="acct-1", from_end_user_id=None, invoke_from=InvokeFrom.WEB_APP)
-    _wire_db(mocker, form=_form(), app=MagicMock(tenant_id="t"), conversation=conversation, account=MagicMock())
-    gen = mocker.patch(f"{MODULE}.AgentAppGenerator")
-    gen.return_value.resume_after_form_submission.side_effect = RuntimeError("boom")
+def test_resume_returns_when_conversation_has_no_user(
+    resume_db: ResumeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resume_db.remove_users()
 
-    # The task must not propagate the failure (it is logged and the session closed).
-    mod.resume_agent_app_execution(conversation_id="conv-1", form_id="form-1")
+    generator = _run(resume_db, monkeypatch)
+
+    generator.resume_after_form_submission.assert_not_called()
+
+
+def test_resume_returns_when_referenced_account_was_deleted(
+    resume_db: ResumeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resume_db.delete(Account, resume_db.account_id)
+
+    generator = _run(resume_db, monkeypatch)
+
+    generator.resume_after_form_submission.assert_not_called()
+
+
+def test_generator_exception_rolls_back_attached_app_changes(
+    resume_db: ResumeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generator = Mock()
+
+    def mutate_then_fail(*, app_model: App, **_kwargs: object) -> None:
+        app_model.name = "uncommitted mutation"
+        raise RuntimeError("generator failed")
+
+    generator.resume_after_form_submission.side_effect = mutate_then_fail
+    monkeypatch.setattr(mod, "AgentAppGenerator", Mock(return_value=generator))
+
+    mod.resume_agent_app_execution(conversation_id=resume_db.conversation_id, form_id=resume_db.form_id)
+
+    with resume_db.session_maker() as verification_session:
+        assert verification_session.get_one(App, resume_db.app_id).name == "Agent App"

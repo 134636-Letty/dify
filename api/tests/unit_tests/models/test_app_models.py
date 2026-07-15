@@ -16,9 +16,11 @@ from unittest.mock import MagicMock, PropertyMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
-from models.enums import ConversationFromSource
+from models.dataset import DatasetCollectionBinding
+from models.enums import CollectionBindingType, ConversationFromSource
 from models.model import (
     App,
     AppAnnotationHitHistory,
@@ -201,7 +203,7 @@ class TestAppModelValidation:
             # Assert
             assert result == AppMode.CHAT
 
-    def test_deleted_tools_checks_plugin_builtin_providers_through_core_plugin_service(self):
+    def test_deleted_tools_checks_plugin_builtin_providers_through_core_plugin_service(self, sqlite_engine: Engine):
         """Plugin-backed built-in tools are checked through core PluginService."""
         # Arrange
         app = App(
@@ -230,15 +232,10 @@ class TestAppModelValidation:
                 }
             ),
         )
-        session_context = MagicMock()
-        session_context.__enter__.return_value = MagicMock()
-        session_factory = SimpleNamespace(begin=MagicMock(return_value=session_context))
-
         # Act
         with (
             patch.object(App, "app_model_config", new_callable=lambda: property(lambda self: app_model_config)),
-            patch("models.model.db", SimpleNamespace(engine=object())),
-            patch("models.model.sessionmaker", return_value=session_factory),
+            patch("models.model.db", SimpleNamespace(engine=sqlite_engine)),
             patch("core.tools.tool_manager.ToolManager.get_hardcoded_provider", side_effect=Exception),
             patch("core.plugin.plugin_service.PluginService.check_tools_existence", return_value=[False]) as exists,
         ):
@@ -360,30 +357,33 @@ class TestAppModelConfig:
 
 
 class TestAnnotationReplyConfigLoader:
-    def test_load_annotation_reply_config_returns_disabled_when_setting_missing(self):
-        session = MagicMock()
-        session.scalar.return_value = None
-
-        result = load_annotation_reply_config(session, "app-1")
+    @pytest.mark.parametrize("sqlite_session", [(AppAnnotationSetting, DatasetCollectionBinding)], indirect=True)
+    def test_load_annotation_reply_config_returns_disabled_when_setting_missing(self, sqlite_session: Session):
+        result = load_annotation_reply_config(sqlite_session, "app-1")
 
         assert result == {"enabled": False}
-        session.scalar.assert_called_once()
-        stmt = session.scalar.call_args.args[0]
-        compiled = str(stmt.compile(dialect=postgresql.dialect()))
-        assert "app_annotation_settings.app_id" in compiled
-        assert stmt.compile().params == {"app_id_1": "app-1"}
 
-    def test_load_annotation_reply_config_returns_embedding_model(self):
-        session = MagicMock()
-        annotation_setting = SimpleNamespace(
-            id="annotation-1",
+    @pytest.mark.parametrize("sqlite_session", [(AppAnnotationSetting, DatasetCollectionBinding)], indirect=True)
+    def test_load_annotation_reply_config_returns_embedding_model(self, sqlite_session: Session):
+        collection_binding = DatasetCollectionBinding(
+            provider_name="provider",
+            model_name="embedding",
+            type=CollectionBindingType.DATASET,
+            collection_name="collection",
+        )
+        collection_binding.id = "binding-1"
+        annotation_setting = AppAnnotationSetting(
+            app_id="app-1",
             score_threshold=0.7,
             collection_binding_id="binding-1",
+            created_user_id="account-1",
+            updated_user_id="account-1",
         )
-        collection_binding = SimpleNamespace(provider_name="provider", model_name="embedding")
-        session.scalar.side_effect = [annotation_setting, collection_binding]
+        annotation_setting.id = "annotation-1"
+        sqlite_session.add_all([collection_binding, annotation_setting])
+        sqlite_session.commit()
 
-        result = load_annotation_reply_config(session, "app-1")
+        result = load_annotation_reply_config(sqlite_session, "app-1")
 
         assert result == {
             "id": "annotation-1",
@@ -394,19 +394,21 @@ class TestAnnotationReplyConfigLoader:
                 "embedding_model_name": "embedding",
             },
         }
-        assert session.scalar.call_count == 2
-        stmt = session.scalar.call_args_list[1].args[0]
-        compiled = str(stmt.compile(dialect=postgresql.dialect()))
-        assert "dataset_collection_bindings.id" in compiled
-        assert stmt.compile().params == {"id_1": "binding-1"}
 
-    def test_load_annotation_reply_config_raises_when_binding_missing(self):
-        session = MagicMock()
-        annotation_setting = SimpleNamespace(collection_binding_id="binding-1")
-        session.scalar.side_effect = [annotation_setting, None]
+    @pytest.mark.parametrize("sqlite_session", [(AppAnnotationSetting, DatasetCollectionBinding)], indirect=True)
+    def test_load_annotation_reply_config_raises_when_binding_missing(self, sqlite_session: Session):
+        annotation_setting = AppAnnotationSetting(
+            app_id="app-1",
+            score_threshold=0.7,
+            collection_binding_id="binding-1",
+            created_user_id="account-1",
+            updated_user_id="account-1",
+        )
+        sqlite_session.add(annotation_setting)
+        sqlite_session.commit()
 
         with pytest.raises(ValueError, match="Collection binding detail not found"):
-            load_annotation_reply_config(session, "app-1")
+            load_annotation_reply_config(sqlite_session, "app-1")
 
 
 class TestConversationModel:
