@@ -106,12 +106,14 @@ def enable_segment_to_index_task(segment_id: str):
                     )
 
             # save vector index
+            session.commit()
             index_processor.load(dataset, [document], multimodal_documents=multimodel_documents)
 
             # Enable summary index for this segment
             from services.summary_index_service import SummaryIndexService
 
             try:
+                session.commit()
                 SummaryIndexService.enable_summaries_for_segments(
                     dataset=dataset,
                     segment_ids=[segment.id],

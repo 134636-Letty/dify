@@ -3,12 +3,12 @@
 import json
 import logging
 import uuid
-from typing import Any, TypedDict, override
+from typing import Any, TypedDict, cast, override
 
 from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
 from configs import dify_config
-from core.db.session_factory import session_factory
 from core.entities.knowledge_entities import PreviewDetail
 from core.model_manager import ModelInstance
 from core.rag.cleaner.clean_processor import CleanProcessor
@@ -156,23 +156,15 @@ class ParentChildIndexProcessor(BaseIndexProcessor):
         # This method is called for actual deletion scenarios (e.g., when segment is deleted).
         # For disable operations, disable_summaries_for_segments is called directly in the task.
         # Only delete summaries if explicitly requested (e.g., when segment is actually deleted)
+        cleanup_session = cast(Session | None, kwargs.get("session"))
         delete_summaries = kwargs.get("delete_summaries", False)
         if delete_summaries:
-            if node_ids:
-                # Find segments by index_node_id
-                with session_factory.create_session() as session:
-                    segments = session.scalars(
-                        select(DocumentSegment).where(
-                            DocumentSegment.dataset_id == dataset.id,
-                            DocumentSegment.index_node_id.in_(node_ids),
-                        )
-                    ).all()
-                    segment_ids = [segment.id for segment in segments]
-                    if segment_ids:
-                        SummaryIndexService.delete_summaries_for_segments(dataset=dataset, segment_ids=segment_ids)
-            else:
-                # Delete all summaries for the dataset
-                SummaryIndexService.delete_summaries_for_segments(dataset=dataset, segment_ids=None)
+            segment_ids = cast(list[str] | None, kwargs.get("segment_ids"))
+            if node_ids and segment_ids is None:
+                raise ValueError("segment_ids are required for partial summary cleanup")
+            SummaryIndexService.delete_summaries_for_segments(
+                dataset=dataset, segment_ids=segment_ids, session=cleanup_session
+            )
 
         if dataset.indexing_technique == IndexTechniqueType.HIGH_QUALITY:
             delete_child_chunks = kwargs.get("delete_child_chunks") or False
@@ -185,7 +177,8 @@ class ParentChildIndexProcessor(BaseIndexProcessor):
                     child_node_ids = precomputed_child_node_ids
                 else:
                     # Fallback to original query (may fail if segments are already deleted)
-                    rows = db.session.execute(
+                    child_session = cleanup_session or db.session
+                    rows = child_session.execute(
                         select(ChildChunk.index_node_id)
                         .join(DocumentSegment, ChildChunk.segment_id == DocumentSegment.id)
                         .where(
@@ -195,6 +188,7 @@ class ParentChildIndexProcessor(BaseIndexProcessor):
                         )
                     ).all()
                     child_node_ids = [row[0] for row in rows if row[0]]
+                    child_session.commit()
 
                 # Delete from vector index
                 if child_node_ids:
@@ -202,23 +196,25 @@ class ParentChildIndexProcessor(BaseIndexProcessor):
 
                 # Delete from database
                 if delete_child_chunks and child_node_ids:
-                    db.session.execute(
+                    child_session = cleanup_session or db.session
+                    child_session.execute(
                         delete(ChildChunk).where(
                             ChildChunk.dataset_id == dataset.id, ChildChunk.index_node_id.in_(child_node_ids)
                         )
                     )
-                    db.session.commit()
+                    child_session.commit()
             else:
                 vector.delete()
 
                 if delete_child_chunks:
                     # Use existing compound index: (tenant_id, dataset_id, ...)
-                    db.session.execute(
+                    child_session = cleanup_session or db.session
+                    child_session.execute(
                         delete(ChildChunk).where(
                             ChildChunk.tenant_id == dataset.tenant_id, ChildChunk.dataset_id == dataset.id
                         )
                     )
-                    db.session.commit()
+                    child_session.commit()
 
     def _split_child_nodes(
         self,

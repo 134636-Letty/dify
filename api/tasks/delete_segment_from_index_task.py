@@ -57,6 +57,8 @@ def delete_segment_from_index_task(
                 delete_child_chunks=True,
                 precomputed_child_node_ids=child_node_ids,
                 delete_summaries=True,  # Actually delete summaries when segment is deleted
+                segment_ids=segment_ids,
+                session=session,
             )
             if dataset.is_multimodal:
                 # delete segment attachment binding

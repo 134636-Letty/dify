@@ -4,14 +4,13 @@ import logging
 import re
 import threading
 import uuid
-from typing import Any, TypedDict, override
+from typing import Any, TypedDict, cast, override
 
 import pandas as pd
 from flask import Flask, current_app
-from sqlalchemy import select
+from sqlalchemy.orm import Session
 from werkzeug.datastructures import FileStorage
 
-from core.db.session_factory import session_factory
 from core.entities.knowledge_entities import PreviewDetail
 from core.llm_generator.llm_generator import LLMGenerator
 from core.rag.cleaner.clean_processor import CleanProcessor
@@ -26,7 +25,7 @@ from core.rag.models.document import AttachmentDocument, Document, QAStructureCh
 from core.tools.utils.text_processing_utils import remove_leading_symbols
 from libs import helper
 from models.account import Account
-from models.dataset import Dataset, DocumentSegment
+from models.dataset import Dataset
 from models.dataset import Document as DatasetDocument
 from services.summary_index_service import SummaryIndexService
 
@@ -162,21 +161,13 @@ class QAIndexProcessor(BaseIndexProcessor):
         # Only delete summaries if explicitly requested (e.g., when segment is actually deleted)
         delete_summaries = kwargs.get("delete_summaries", False)
         if delete_summaries:
-            if node_ids:
-                # Find segments by index_node_id
-                with session_factory.create_session() as session:
-                    segments = session.scalars(
-                        select(DocumentSegment).where(
-                            DocumentSegment.dataset_id == dataset.id,
-                            DocumentSegment.index_node_id.in_(node_ids),
-                        )
-                    ).all()
-                    segment_ids = [segment.id for segment in segments]
-                    if segment_ids:
-                        SummaryIndexService.delete_summaries_for_segments(dataset=dataset, segment_ids=segment_ids)
-            else:
-                # Delete all summaries for the dataset
-                SummaryIndexService.delete_summaries_for_segments(dataset=dataset, segment_ids=None)
+            cleanup_session = cast(Session | None, kwargs.get("session"))
+            segment_ids = cast(list[str] | None, kwargs.get("segment_ids"))
+            if node_ids and segment_ids is None:
+                raise ValueError("segment_ids are required for partial summary cleanup")
+            SummaryIndexService.delete_summaries_for_segments(
+                dataset=dataset, segment_ids=segment_ids, session=cleanup_session
+            )
 
         vector = Vector(dataset)
         if node_ids:

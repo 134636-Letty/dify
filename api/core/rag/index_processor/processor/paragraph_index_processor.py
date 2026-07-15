@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 from sqlalchemy import select
 
-from core.app.file_access import DatabaseFileAccessController
 from core.app.llm import deduct_llm_quota
+from core.db.session_factory import session_factory
 from core.entities.knowledge_entities import PreviewDetail
 from core.llm_generator.prompts import DEFAULT_GENERATOR_SUMMARY_PROMPT
 from core.model_manager import ModelInstance
@@ -31,7 +31,6 @@ from core.rag.models.document import AttachmentDocument, Document, MultimodalGen
 from core.tools.utils.text_processing_utils import remove_leading_symbols
 from core.workflow.file_reference import build_file_reference
 from extensions.ext_database import db
-from factories.file_factory import build_from_mapping
 from graphon.file import File, FileTransferMethod, FileType, file_manager
 from graphon.model_runtime.entities.llm_entities import LLMResult, LLMUsage
 from graphon.model_runtime.entities.message_entities import (
@@ -45,12 +44,10 @@ from graphon.model_runtime.entities.model_entities import ModelFeature, ModelTyp
 from libs import helper
 from models import UploadFile
 from models.account import Account
-from models.dataset import Dataset, DatasetProcessRule, DocumentSegment, SegmentAttachmentBinding
+from models.dataset import Dataset, DatasetProcessRule, SegmentAttachmentBinding
 from models.dataset import Document as DatasetDocument
 from services.account_service import AccountService
 from services.summary_index_service import SummaryIndexService
-
-_file_access_controller = DatabaseFileAccessController()
 
 
 class ParagraphFormatPreviewDict(TypedDict):
@@ -152,20 +149,13 @@ class ParagraphIndexProcessor(BaseIndexProcessor):
         # Only delete summaries if explicitly requested (e.g., when segment is actually deleted)
         delete_summaries = kwargs.get("delete_summaries", False)
         if delete_summaries:
-            if node_ids:
-                # Find segments by index_node_id
-                segments = db.session.scalars(
-                    select(DocumentSegment).where(
-                        DocumentSegment.dataset_id == dataset.id,
-                        DocumentSegment.index_node_id.in_(node_ids),
-                    )
-                ).all()
-                segment_ids = [segment.id for segment in segments]
-                if segment_ids:
-                    SummaryIndexService.delete_summaries_for_segments(dataset=dataset, segment_ids=segment_ids)
-            else:
-                # Delete all summaries for the dataset
-                SummaryIndexService.delete_summaries_for_segments(dataset=dataset, segment_ids=None)
+            cleanup_session = cast(Session | None, kwargs.get("session"))
+            segment_ids = cast(list[str] | None, kwargs.get("segment_ids"))
+            if node_ids and segment_ids is None:
+                raise ValueError("segment_ids are required for partial summary cleanup")
+            SummaryIndexService.delete_summaries_for_segments(
+                dataset=dataset, segment_ids=segment_ids, session=cleanup_session
+            )
 
         if dataset.indexing_technique == IndexTechniqueType.HIGH_QUALITY:
             vector = Vector(dataset)
@@ -411,15 +401,14 @@ class ParagraphIndexProcessor(BaseIndexProcessor):
         # Extract images if model supports vision
         image_files = []
         if supports_vision:
-            # First, try to get images from SegmentAttachmentBinding (preferred method)
-            if segment_id:
-                image_files = ParagraphIndexProcessor._extract_images_from_segment_attachments(
-                    tenant_id, segment_id, db.session()
-                )
+            with session_factory.create_session() as image_session:
+                if segment_id:
+                    image_files = ParagraphIndexProcessor._extract_images_from_segment_attachments(
+                        tenant_id, segment_id, image_session
+                    )
 
-            # If no images from attachments, fall back to extracting from text
-            if not image_files:
-                image_files = ParagraphIndexProcessor._extract_images_from_text(tenant_id, text, db.session())
+                if not image_files:
+                    image_files = ParagraphIndexProcessor._extract_images_from_text(tenant_id, text, image_session)
 
         # Build prompt messages
         prompt_messages = []
@@ -533,17 +522,18 @@ class ParagraphIndexProcessor(BaseIndexProcessor):
             if not upload_file.mime_type or "image" not in upload_file.mime_type:
                 continue
 
-            mapping = {
-                "upload_file_id": upload_file.id,
-                "transfer_method": FileTransferMethod.LOCAL_FILE.value,
-                "type": FileType.IMAGE.value,
-            }
-
             try:
-                file_obj = build_from_mapping(
-                    mapping=mapping,
-                    tenant_id=tenant_id,
-                    access_controller=_file_access_controller,
+                file_obj = File(
+                    file_id=upload_file.id,
+                    filename=upload_file.name,
+                    extension="." + upload_file.extension,
+                    mime_type=upload_file.mime_type,
+                    file_type=FileType.IMAGE,
+                    transfer_method=FileTransferMethod.LOCAL_FILE,
+                    remote_url=upload_file.source_url,
+                    reference=build_file_reference(record_id=upload_file.id),
+                    size=upload_file.size,
+                    storage_key=upload_file.key,
                 )
                 file_objects.append(file_obj)
             except Exception as e:

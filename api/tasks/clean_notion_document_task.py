@@ -24,6 +24,7 @@ def clean_notion_document_task(document_ids: list[str], dataset_id: str):
     logger.info(click.style(f"Start clean document when import form notion document deleted: {dataset_id}", fg="green"))
     start_at = time.perf_counter()
     total_index_node_ids = []
+    total_segment_ids: list[str] = []
 
     with session_factory.create_session() as session:
         dataset = session.scalar(select(Dataset).where(Dataset.id == dataset_id).limit(1))
@@ -39,6 +40,7 @@ def clean_notion_document_task(document_ids: list[str], dataset_id: str):
         for document_id in document_ids:
             segments = session.scalars(select(DocumentSegment).where(DocumentSegment.document_id == document_id)).all()
             total_index_node_ids.extend([segment.index_node_id for segment in segments if segment.index_node_id])
+            total_segment_ids.extend(segment.id for segment in segments)
 
     # Wrap vector / keyword index cleanup in try/except so that a transient
     # failure here (e.g. billing API hiccup propagated via FeatureService when
@@ -52,7 +54,13 @@ def clean_notion_document_task(document_ids: list[str], dataset_id: str):
             dataset = session.scalar(select(Dataset).where(Dataset.id == dataset_id).limit(1))
             if dataset:
                 index_processor.clean(
-                    dataset, total_index_node_ids, with_keywords=True, delete_child_chunks=True, delete_summaries=True
+                    dataset,
+                    total_index_node_ids,
+                    with_keywords=True,
+                    delete_child_chunks=True,
+                    delete_summaries=True,
+                    segment_ids=total_segment_ids,
+                    session=session,
                 )
     except Exception:
         logger.exception(
