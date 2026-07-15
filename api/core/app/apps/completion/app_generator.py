@@ -15,8 +15,8 @@ from core.app.app_config.easy_ui_based_app.model_config.converter import ModelCo
 from core.app.app_config.features.file_upload.manager import FileUploadConfigManager
 from core.app.apps.base_app_queue_manager import AppQueueManager, PublishFrom
 from core.app.apps.completion.app_config_manager import CompletionAppConfigManager
-from core.app.apps.completion.app_runner import CompletionAppRunner
 from core.app.apps.completion.generate_response_converter import CompletionAppGenerateResponseConverter
+from core.app.apps.completion.workflow_runner import CompletionWorkflowRunner
 from core.app.apps.exc import GenerateTaskStoppedError
 from core.app.apps.message_based_app_generator import MessageBasedAppGenerator
 from core.app.apps.message_based_app_queue_manager import MessageBasedAppQueueManager
@@ -180,7 +180,6 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
             def worker_with_context():
                 return context.run(
                     self._generate_worker,
-                    session=session,
                     flask_app=current_app._get_current_object(),  # type: ignore
                     application_generate_entity=application_generate_entity,
                     queue_manager=queue_manager,
@@ -206,7 +205,6 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
     def _generate_worker(
         self,
         flask_app: Flask,
-        session: Session,
         application_generate_entity: CompletionAppGenerateEntity,
         queue_manager: AppQueueManager,
         message_id: str,
@@ -225,9 +223,8 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
                 message = self._get_message(message_id)
 
                 # chatbot app
-                runner = CompletionAppRunner()
+                runner = CompletionWorkflowRunner()
                 runner.run(
-                    session=session,
                     application_generate_entity=application_generate_entity,
                     queue_manager=queue_manager,
                     message=message,
@@ -352,7 +349,6 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
             def worker_with_context():
                 return context.run(
                     self._generate_worker,
-                    session=session,
                     flask_app=current_app._get_current_object(),  # type: ignore
                     application_generate_entity=application_generate_entity,
                     queue_manager=queue_manager,
