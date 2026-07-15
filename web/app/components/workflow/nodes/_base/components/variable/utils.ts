@@ -1,4 +1,3 @@
-import type { SelectorParam, TFunction } from 'i18next'
 import type { AnswerNodeType } from '../../../answer/types'
 import type { CodeNodeType } from '../../../code/types'
 import type { DocExtractorNodeType } from '../../../document-extractor/types'
@@ -66,22 +65,6 @@ import { AppModeEnum } from '@/types/app'
 import { OUTPUT_FILE_SUB_VARIABLES } from '../../../constants'
 import { Type } from '../../../llm/types'
 import { VarType as ToolVarType } from '../../../tool/types'
-
-type WorkflowTranslate = <const Selector extends SelectorParam<'workflow'>>(
-  selector: Selector,
-  options: { ns: 'workflow' } & Record<string, unknown>,
-) => ReturnType<TFunction>
-
-const translateWorkflowString = <const Selector extends SelectorParam<'workflow'>>(
-  t: WorkflowTranslate,
-  selector: Selector,
-): string => {
-  const result = t(selector, { ns: 'workflow' })
-  if (typeof result !== 'string')
-    throw new TypeError('Expected workflow translation selector to return a string')
-
-  return result
-}
 
 export const isSystemVar = (valueSelector: ValueSelector) => {
   return valueSelector[0] === 'sys' || valueSelector[1] === 'sys'
@@ -581,7 +564,11 @@ const formatItem = (
               : (`${output.type ? output.type.slice(0, 1).toLocaleUpperCase() + output.type.slice(1) : 'Unknown'}` as VarType),
         })
       })
-      res.vars = [...outputs, ...TOOL_OUTPUT_STRUCT, ...AGENT_OUTPUT_STRUCT]
+      const reasoningOutputs: Var[] =
+        payload.reasoning_format === 'separated'
+          ? [{ variable: 'reasoning_content', type: VarType.string }]
+          : []
+      res.vars = [...outputs, ...TOOL_OUTPUT_STRUCT, ...AGENT_OUTPUT_STRUCT, ...reasoningOutputs]
       break
     }
 
@@ -1112,7 +1099,7 @@ export const toNodeAvailableVars = ({
   schemaTypeDefinitions,
 }: {
   parentNode?: Node | null
-  t?: WorkflowTranslate
+  t?: any
   // to get those nodes output vars
   beforeNodes: Node[]
   isChatMode: boolean
@@ -1163,7 +1150,7 @@ export const toNodeAvailableVars = ({
         : {}
     const iterationVar = {
       nodeId: iterationNode?.id,
-      title: translateWorkflowString(t!, ($) => $['nodes.iteration.currentIteration']),
+      title: t('nodes.iteration.currentIteration', { ns: 'workflow' }),
       vars: [
         {
           variable: 'item',
