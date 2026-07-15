@@ -163,6 +163,8 @@ def get_app_model_with_trial[**P, R](
     *,
     mode: AppMode | list[AppMode] | None = None,
 ) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+    """Inject an app registered for trial or available from the recommended catalog."""
+
     def decorator(view_func: Callable[P, R]) -> Callable[P, R]:
         @wraps(view_func)
         def decorated_view(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -174,11 +176,9 @@ def get_app_model_with_trial[**P, R](
 
             del kwargs["app_id"]
 
-            # note: Recommended Apps rely on the trial-apps router to function.
-            if _is_recommended_app(app_id):
-                app_model = _load_app_model_without_applying_current_tenant(app_id)
-            else:
-                app_model = _load_app_model_with_trial(app_id)
+            app_model = _load_app_model_with_trial(app_id)
+            if app_model is None:
+                app_model = RecommendedAppService.get_app(app_id, session=db.session())
 
             if not app_model:
                 raise AppNotFoundError()

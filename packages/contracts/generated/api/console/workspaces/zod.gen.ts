@@ -790,6 +790,18 @@ export const zSnippetPaginationResponse = z.object({
 export const zImportStatus = z.enum(['completed', 'completed-with-warnings', 'failed', 'pending'])
 
 /**
+ * DslImportWarning
+ *
+ * Portable DSL reference that could not be restored in the target workspace.
+ */
+export const zDslImportWarning = z.object({
+  code: z.string(),
+  details: z.record(z.string(), z.unknown()).optional(),
+  message: z.string(),
+  path: z.string(),
+})
+
+/**
  * SnippetImportResponse
  */
 export const zSnippetImportResponse = z.object({
@@ -799,6 +811,7 @@ export const zSnippetImportResponse = z.object({
   imported_dsl_version: z.string(),
   snippet_id: z.string().nullable(),
   status: zImportStatus,
+  warnings: z.array(zDslImportWarning),
 })
 
 /**
