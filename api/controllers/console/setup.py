@@ -3,6 +3,7 @@ from typing import Literal
 from flask import request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
+from sqlalchemy.orm import scoped_session
 
 from configs import dify_config
 from controllers.fastopenapi import console_router
@@ -53,7 +54,7 @@ def get_setup_status_api() -> SetupStatusResponse:
     Only bootstrap-safe status information should be returned by this endpoint.
     """
     if dify_config.EDITION == "SELF_HOSTED":
-        setup_status = get_setup_status()
+        setup_status = get_setup_status(session=db.session)
         if setup_status and not isinstance(setup_status, bool):
             return SetupStatusResponse(step="finished", setup_at=setup_status.setup_at.isoformat())
         if setup_status:
@@ -76,7 +77,7 @@ def setup_system(payload: SetupRequestPayload) -> SetupResponse:
     Access is restricted by deployment mode (`SELF_HOSTED`), one-time setup guards,
     and init-password validation rather than user session authentication.
     """
-    if get_setup_status():
+    if get_setup_status(session=db.session):
         raise AlreadySetupError()
 
     tenant_count = TenantService.get_tenant_count(session=db.session())
@@ -101,8 +102,8 @@ def setup_system(payload: SetupRequestPayload) -> SetupResponse:
     return SetupResponse(result="success")
 
 
-def get_setup_status() -> DifySetup | bool | None:
+def get_setup_status(*, session: scoped_session) -> DifySetup | bool | None:
     if dify_config.EDITION == "SELF_HOSTED":
-        return db.session.scalar(select(DifySetup).limit(1))
+        return session.scalar(select(DifySetup).limit(1))
 
     return True
