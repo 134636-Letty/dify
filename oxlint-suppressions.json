@@ -715,14 +715,6 @@
       "count": 5
     }
   },
-  "web/app/components/app/configuration/debug/hooks.tsx": {
-    "no-restricted-globals": {
-      "count": 2
-    },
-    "typescript/no-explicit-any": {
-      "count": 3
-    }
-  },
   "web/app/components/app/configuration/debug/index.tsx": {
     "eslint-react/set-state-in-effect": {
       "count": 1

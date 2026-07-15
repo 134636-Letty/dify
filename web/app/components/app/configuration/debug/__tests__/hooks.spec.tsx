@@ -37,6 +37,61 @@ describe('configuration debug hooks', () => {
     })
   })
 
+  it('should initialize multiple-model debug settings from local storage', () => {
+    localStorage.setItem('app-debug-with-single-or-multiple-models', JSON.stringify({
+      'app-1': {
+        multiple: true,
+        configs: [
+          {
+            id: 'model-1',
+            model: 'gpt-4o',
+            provider: 'langgenius/openai/openai',
+            parameters: { temperature: 0.7 },
+          },
+        ],
+      },
+    }))
+
+    const { result } = renderHook(() => useDebugWithSingleOrMultipleModel('app-1'))
+
+    expect(result.current.debugWithMultipleModel).toBe(true)
+    expect(result.current.multipleModelConfigs).toEqual([
+      {
+        id: 'model-1',
+        model: 'gpt-4o',
+        provider: 'langgenius/openai/openai',
+        parameters: { temperature: 0.7 },
+      },
+    ])
+  })
+
+  it('should replace malformed stored settings with a valid update', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    localStorage.setItem('app-debug-with-single-or-multiple-models', '{invalid')
+
+    try {
+      const { result } = renderHook(() => useDebugWithSingleOrMultipleModel('app-1'))
+
+      expect(result.current.debugWithMultipleModel).toBe(false)
+      expect(result.current.multipleModelConfigs).toEqual([])
+
+      act(() => {
+        result.current.handleMultipleModelConfigsChange(true, [])
+      })
+
+      expect(
+        JSON.parse(localStorage.getItem('app-debug-with-single-or-multiple-models') || '{}'),
+      ).toEqual({
+        'app-1': {
+          multiple: true,
+          configs: [],
+        },
+      })
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
   it('should persist multiple-model debug settings in local storage', () => {
     const { result } = renderHook(() => useDebugWithSingleOrMultipleModel('app-1'))
 
@@ -66,6 +121,33 @@ describe('configuration debug hooks', () => {
             parameters: { temperature: 0.7 },
           },
         ],
+      },
+    })
+  })
+
+  it('should preserve settings for other apps when persisting an update', () => {
+    localStorage.setItem('app-debug-with-single-or-multiple-models', JSON.stringify({
+      'app-2': {
+        multiple: false,
+        configs: [],
+      },
+    }))
+    const { result } = renderHook(() => useDebugWithSingleOrMultipleModel('app-1'))
+
+    act(() => {
+      result.current.handleMultipleModelConfigsChange(true, [])
+    })
+
+    expect(
+      JSON.parse(localStorage.getItem('app-debug-with-single-or-multiple-models') || '{}'),
+    ).toEqual({
+      'app-2': {
+        multiple: false,
+        configs: [],
+      },
+      'app-1': {
+        multiple: true,
+        configs: [],
       },
     })
   })

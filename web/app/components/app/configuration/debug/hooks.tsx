@@ -1,38 +1,28 @@
-import type { DebugWithSingleOrMultipleModelConfigs, ModelAndParameter } from './types'
+import type { ModelAndParameter } from './types'
 import type { ChatConfig, ChatItem } from '@/app/components/base/chat/types'
+import type { EventEmitterValue } from '@/context/event-emitter'
 import { cloneDeep } from 'es-toolkit/object'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback } from 'react'
 import { SupportUploadFileTypes } from '@/app/components/workflow/types'
 import { DEFAULT_CHAT_PROMPT_CONFIG, DEFAULT_COMPLETION_PROMPT_CONFIG } from '@/config'
 import { useDebugConfigurationContext } from '@/context/debug-configuration'
 import { useEventEmitterContextContext } from '@/context/event-emitter'
 import { AgentStrategy } from '@/types/app'
 import { promptVariablesToUserInputsForm } from '@/utils/model-config'
+import { useDebugWithSingleOrMultipleModelConfigs } from './storage'
 import { ORCHESTRATE_CHANGED } from './types'
 
+const EMPTY_MODEL_CONFIGS: ModelAndParameter[] = []
+
 export const useDebugWithSingleOrMultipleModel = (appId: string) => {
-  const localeDebugWithSingleOrMultipleModelConfigs = localStorage.getItem(
-    'app-debug-with-single-or-multiple-models',
-  )
+  const [
+    debugWithSingleOrMultipleModelConfigs,
+    setDebugWithSingleOrMultipleModelConfigs,
+  ] = useDebugWithSingleOrMultipleModelConfigs()
 
-  const debugWithSingleOrMultipleModelConfigs = useRef<DebugWithSingleOrMultipleModelConfigs>({})
-
-  if (localeDebugWithSingleOrMultipleModelConfigs) {
-    try {
-      debugWithSingleOrMultipleModelConfigs.current =
-        JSON.parse(localeDebugWithSingleOrMultipleModelConfigs) || {}
-    } catch (e) {
-      console.error(e)
-    }
-  }
-
-  const [debugWithMultipleModel, setDebugWithMultipleModel] = useState(
-    debugWithSingleOrMultipleModelConfigs.current[appId]?.multiple || false,
-  )
-
-  const [multipleModelConfigs, setMultipleModelConfigs] = useState(
-    debugWithSingleOrMultipleModelConfigs.current[appId]?.configs || [],
-  )
+  const appDebugConfig = debugWithSingleOrMultipleModelConfigs[appId]
+  const debugWithMultipleModel = appDebugConfig?.multiple ?? false
+  const multipleModelConfigs = appDebugConfig?.configs ?? EMPTY_MODEL_CONFIGS
 
   const handleMultipleModelConfigsChange = useCallback(
     (multiple: boolean, modelConfigs: ModelAndParameter[]) => {
@@ -40,15 +30,12 @@ export const useDebugWithSingleOrMultipleModel = (appId: string) => {
         multiple,
         configs: modelConfigs,
       }
-      debugWithSingleOrMultipleModelConfigs.current[appId] = value
-      localStorage.setItem(
-        'app-debug-with-single-or-multiple-models',
-        JSON.stringify(debugWithSingleOrMultipleModelConfigs.current),
-      )
-      setDebugWithMultipleModel(value.multiple)
-      setMultipleModelConfigs(value.configs)
+      setDebugWithSingleOrMultipleModelConfigs(configs => ({
+        ...(configs ?? {}),
+        [appId]: value,
+      }))
     },
-    [appId],
+    [appId, setDebugWithSingleOrMultipleModelConfigs],
   )
 
   return {
@@ -110,8 +97,8 @@ export const useConfigFromDebugContext = () => {
     dataset_configs: {
       ...datasetConfigs,
       datasets: {
-        datasets: [...postDatasets],
-      } as any,
+        datasets: [...postDatasets] as unknown as ChatConfig['dataset_configs']['datasets']['datasets'],
+      },
     },
     file_upload: {
       image: visionConfig,
@@ -137,7 +124,7 @@ export const useFormattingChangedDispatcher = () => {
   const dispatcher = useCallback(() => {
     eventEmitter?.emit({
       type: ORCHESTRATE_CHANGED,
-    } as any)
+    })
   }, [eventEmitter])
 
   return dispatcher
@@ -145,9 +132,10 @@ export const useFormattingChangedDispatcher = () => {
 export const useFormattingChangedSubscription = (chatList: ChatItem[]) => {
   const { formattingChanged, setFormattingChanged } = useDebugConfigurationContext()
   const { eventEmitter } = useEventEmitterContextContext()
-  eventEmitter?.useSubscription((v: any) => {
-    if (v.type === ORCHESTRATE_CHANGED) {
-      if (chatList.some((item) => item.isAnswer) && !formattingChanged) setFormattingChanged(true)
+  eventEmitter?.useSubscription((v: EventEmitterValue) => {
+    if (typeof v !== 'string' && v.type === ORCHESTRATE_CHANGED) {
+      if (chatList.some(item => item.isAnswer) && !formattingChanged)
+        setFormattingChanged(true)
     }
   })
 }
