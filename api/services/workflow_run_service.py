@@ -1,9 +1,9 @@
 import threading
 from collections.abc import Sequence
-from typing import TypedDict
+from typing import Any, TypedDict, Union
 
 from sqlalchemy import Engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 import contexts
 from extensions.ext_database import db
@@ -51,6 +51,7 @@ class WorkflowRunService:
         self,
         app_model: App,
         args: WorkflowRunListArgs,
+        session: Union[Session, scoped_session, Any],
         triggered_from: WorkflowRunTriggeredFrom = WorkflowRunTriggeredFrom.DEBUGGING,
     ) -> InfiniteScrollPagination:
         """
@@ -80,7 +81,7 @@ class WorkflowRunService:
         run_ids = [workflow_run.id for workflow_run in workflow_runs]
         messages_by_run_id: dict[str, Message] = {}
         if run_ids:
-            messages = db.session.scalars(
+            messages = session.scalars(
                 select(Message).where(
                     Message.app_id == app_model.id,
                     Message.workflow_run_id.in_(run_ids),
