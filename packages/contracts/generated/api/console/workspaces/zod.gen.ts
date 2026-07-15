@@ -90,9 +90,18 @@ export const zEndpointUpdatePayload = z.object({
  * MemberInvitePayload
  */
 export const zMemberInvitePayload = z.object({
-  emails: z.array(z.string()).optional(),
+  emails: z.array(z.string()).min(1),
   language: z.string().nullish(),
   role: z.string(),
+})
+
+/**
+ * MemberInviteErrorResponse
+ */
+export const zMemberInviteErrorResponse = z.object({
+  code: z.enum(['invalid_param', 'invalid_role', 'limit_exceeded']),
+  message: z.string(),
+  status: z.literal(400),
 })
 
 /**
@@ -829,21 +838,56 @@ export const zAccountWithRoleListResponse = z.object({
 })
 
 /**
- * MemberInviteResultResponse
+ * MemberInviteSuccessResponse
  */
-export const zMemberInviteResultResponse = z.object({
+export const zMemberInviteSuccessResponse = z.object({
   email: z.string(),
-  message: z.string().nullish(),
-  status: z.string(),
-  url: z.string().nullish(),
+  status: z.literal('success'),
+  url: z.string(),
+})
+
+/**
+ * MemberInviteAlreadyMemberResponse
+ */
+export const zMemberInviteAlreadyMemberResponse = z.object({
+  email: z.string(),
+  message: z.string(),
+  status: z.literal('already_member'),
+})
+
+/**
+ * MemberInviteFailedResponse
+ */
+export const zMemberInviteFailedResponse = z.object({
+  email: z.string(),
+  message: z.string(),
+  status: z.literal('failed'),
 })
 
 /**
  * MemberInviteResponse
  */
 export const zMemberInviteResponse = z.object({
-  invitation_results: z.array(zMemberInviteResultResponse),
-  result: z.string(),
+  invitation_results: z.array(
+    z.union([
+      z
+        .object({
+          status: z.literal('success'),
+        })
+        .and(zMemberInviteSuccessResponse),
+      z
+        .object({
+          status: z.literal('already_member'),
+        })
+        .and(zMemberInviteAlreadyMemberResponse),
+      z
+        .object({
+          status: z.literal('failed'),
+        })
+        .and(zMemberInviteFailedResponse),
+    ]),
+  ),
+  result: z.literal('success'),
   tenant_id: z.string(),
 })
 
@@ -2373,12 +2417,12 @@ export const zEventParameterType = z.enum([
  */
 export const zPriceConfigResponse = z.object({
   currency: z.string(),
-  input: z.string().regex(/^(?![-+.]*$)[+-]?\d*(?:\.\d*)?$/),
+  input: z.string().regex(/^(?![-+.]*$)[+-]?0*\d*\.?\d*$/),
   output: z
     .string()
-    .regex(/^(?![-+.]*$)[+-]?\d*(?:\.\d*)?$/)
+    .regex(/^(?![-+.]*$)[+-]?0*\d*\.?\d*$/)
     .nullish(),
-  unit: z.string().regex(/^(?![-+.]*$)[+-]?\d*(?:\.\d*)?$/),
+  unit: z.string().regex(/^(?![-+.]*$)[+-]?0*\d*\.?\d*$/),
 })
 
 /**
@@ -2883,12 +2927,12 @@ export const zToolProviderEntity = z.object({
  */
 export const zPriceConfig = z.object({
   currency: z.string(),
-  input: z.string().regex(/^(?![-+.]*$)[+-]?\d*(?:\.\d*)?$/),
+  input: z.string().regex(/^(?![-+.]*$)[+-]?0*\d*\.?\d*$/),
   output: z
     .string()
-    .regex(/^(?![-+.]*$)[+-]?\d*(?:\.\d*)?$/)
+    .regex(/^(?![-+.]*$)[+-]?0*\d*\.?\d*$/)
     .nullish(),
-  unit: z.string().regex(/^(?![-+.]*$)[+-]?\d*(?:\.\d*)?$/),
+  unit: z.string().regex(/^(?![-+.]*$)[+-]?0*\d*\.?\d*$/),
 })
 
 /**
@@ -3257,7 +3301,7 @@ export const zPluginDeclaration = z.object({
   agent_strategy: zAgentStrategyProviderEntity.nullish(),
   author: z
     .string()
-    .regex(/^[\w-]{1,64}$/)
+    .regex(/^[a-zA-Z0-9_-]{1,64}$/)
     .nullable(),
   category: zPluginCategory,
   created_at: z.iso.datetime(),

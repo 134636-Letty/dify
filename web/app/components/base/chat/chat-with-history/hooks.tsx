@@ -61,6 +61,18 @@ function getFormattedChatList(messages: any[]) {
     })
     const answerFiles =
       item.message_files?.filter((file: any) => file.belongs_to === 'assistant') || []
+    const answerTokens = item.answer_tokens ?? 0
+    const messageTokens = item.message_tokens ?? 0
+    const latency = Number(item.provider_response_latency)
+    const more =
+      item.provider_response_latency == null || !Number.isFinite(latency)
+        ? undefined
+        : {
+            time: '',
+            tokens: answerTokens + messageTokens,
+            latency: latency.toFixed(2),
+            tokens_per_second: latency > 0 ? (answerTokens / latency).toFixed(2) : undefined,
+          }
     const humanInputFormDataList: HumanInputFormData[] = []
     const humanInputFilledFormDataList: HumanInputFilledFormData[] = []
     let workflowRunId = ''
@@ -111,6 +123,7 @@ function getFormattedChatList(messages: any[]) {
       humanInputFormDataList,
       humanInputFilledFormDataList,
       workflow_run_id: workflowRunId,
+      more,
     })
   })
   return newChatList
@@ -259,7 +272,7 @@ export const useChatWithHistory = (installedAppInfo?: InstalledApp) => {
   const [initUserVariables, setInitUserVariables] = useState<Record<string, any>>({})
   const handleNewConversationInputsChange = useCallback((newInputs: Record<string, any>) => {
     newConversationInputsRef.current = newInputs
-    // eslint-disable-next-line react/set-state-in-effect -- This handler intentionally syncs derived input defaults when called from the reset effect below.
+    // oxlint-disable-next-line eslint-react/set-state-in-effect -- This handler intentionally syncs derived input defaults when called from the reset effect below.
     setNewConversationInputs(newInputs)
   }, [])
   const inputsForms = useMemo(() => {
@@ -363,7 +376,7 @@ export const useChatWithHistory = (installedAppInfo?: InstalledApp) => {
   const [originConversationList, setOriginConversationList] = useState<ConversationItem[]>([])
   useEffect(() => {
     if (appConversationData?.data && !appConversationDataLoading)
-      // eslint-disable-next-line react/set-state-in-effect -- Conversation query results intentionally replace the local editable list.
+      // oxlint-disable-next-line eslint-react/set-state-in-effect -- Conversation query results intentionally replace the local editable list.
       setOriginConversationList(appConversationData?.data)
   }, [appConversationData, appConversationDataLoading])
   const conversationList = useMemo(() => {
@@ -380,7 +393,7 @@ export const useChatWithHistory = (installedAppInfo?: InstalledApp) => {
   }, [originConversationList, showNewConversationItemInList, t])
   useEffect(() => {
     if (newConversation) {
-      // eslint-disable-next-line react/set-state-in-effect -- Newly resolved conversation names intentionally patch the local list cache.
+      // oxlint-disable-next-line eslint-react/set-state-in-effect -- Newly resolved conversation names intentionally patch the local list cache.
       setOriginConversationList(
         produce((draft) => {
           const index = draft.findIndex((item) => item.id === newConversation.id)
@@ -406,7 +419,7 @@ export const useChatWithHistory = (installedAppInfo?: InstalledApp) => {
   )
   useEffect(() => {
     if (currentConversationItem)
-      // eslint-disable-next-line react/set-state-in-effect -- Selected conversation changes intentionally resync the editable input snapshot.
+      // oxlint-disable-next-line eslint-react/set-state-in-effect -- Selected conversation changes intentionally resync the editable input snapshot.
       setCurrentConversationInputs(currentConversationLatestInputs || {})
   }, [currentConversationItem, currentConversationLatestInputs])
   const checkInputsRequired = useCallback(

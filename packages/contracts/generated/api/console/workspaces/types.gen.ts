@@ -162,15 +162,31 @@ export type EndpointUpdatePayload = {
 }
 
 export type MemberInvitePayload = {
-  emails?: Array<string>
+  emails: Array<string>
   language?: string | null
   role: string
 }
 
 export type MemberInviteResponse = {
-  invitation_results: Array<MemberInviteResultResponse>
-  result: string
+  invitation_results: Array<
+    | ({
+        status: 'success'
+      } & MemberInviteSuccessResponse)
+    | ({
+        status: 'already_member'
+      } & MemberInviteAlreadyMemberResponse)
+    | ({
+        status: 'failed'
+      } & MemberInviteFailedResponse)
+  >
+  result: 'success'
   tenant_id: string
+}
+
+export type MemberInviteErrorResponse = {
+  code: 'invalid_param' | 'invalid_role' | 'limit_exceeded'
+  message: string
+  status: 400
 }
 
 export type OwnerTransferCheckPayload = {
@@ -1138,11 +1154,22 @@ export type EndpointListItemResponse = {
   url: string
 }
 
-export type MemberInviteResultResponse = {
+export type MemberInviteSuccessResponse = {
   email: string
-  message?: string | null
-  status: string
-  url?: string | null
+  status: 'success'
+  url: string
+}
+
+export type MemberInviteAlreadyMemberResponse = {
+  email: string
+  message: string
+  status: 'already_member'
+}
+
+export type MemberInviteFailedResponse = {
+  email: string
+  message: string
+  status: 'failed'
 }
 
 export type ProviderResponse = {
@@ -2892,6 +2919,13 @@ export type PostWorkspacesCurrentMembersInviteEmailData = {
   query?: never
   url: '/workspaces/current/members/invite-email'
 }
+
+export type PostWorkspacesCurrentMembersInviteEmailErrors = {
+  400: MemberInviteErrorResponse
+}
+
+export type PostWorkspacesCurrentMembersInviteEmailError =
+  PostWorkspacesCurrentMembersInviteEmailErrors[keyof PostWorkspacesCurrentMembersInviteEmailErrors]
 
 export type PostWorkspacesCurrentMembersInviteEmailResponses = {
   201: MemberInviteResponse
