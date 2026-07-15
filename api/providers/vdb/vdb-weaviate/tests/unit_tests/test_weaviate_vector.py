@@ -11,6 +11,7 @@ Focuses on verifying that doc_type is properly handled in:
 
 import datetime
 import json
+import logging
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -63,12 +64,11 @@ class TestWeaviateVector(unittest.TestCase):
         mock_client.close.side_effect = RuntimeError("close failed")
         weaviate_vector_module._weaviate_client = mock_client
 
-        with patch.object(weaviate_vector_module.logger, "debug") as mock_debug:
+        with self.assertLogs(weaviate_vector_module.logger.name, level=logging.DEBUG):
             weaviate_vector_module._shutdown_weaviate_client()
 
         assert weaviate_vector_module._weaviate_client is None
         mock_client.close.assert_called_once()
-        mock_debug.assert_called_once()
 
     @patch("dify_vdb_weaviate.weaviate_vector.weaviate.connect_to_custom")
     def test_init_client_reuses_cached_client_without_reconnect(self, mock_connect):
@@ -269,12 +269,11 @@ class TestWeaviateVector(unittest.TestCase):
         wv._client.collections.exists.side_effect = RuntimeError("create failed")
 
         with (
-            patch.object(weaviate_vector_module.logger, "exception") as mock_exception,
+            self.assertLogs(weaviate_vector_module.logger.name, level=logging.ERROR),
             pytest.raises(RuntimeError, match="create failed"),
         ):
             wv._create_collection()
 
-        mock_exception.assert_called_once()
 
     @patch("dify_vdb_weaviate.weaviate_vector.weaviate")
     def test_ensure_properties_adds_missing_doc_type(self, mock_weaviate_module):
@@ -388,10 +387,10 @@ class TestWeaviateVector(unittest.TestCase):
             attributes=self.attributes,
         )
 
-        with patch.object(weaviate_vector_module.logger, "warning") as mock_warning:
+        with self.assertLogs(weaviate_vector_module.logger.name, level=logging.WARNING) as cm:
             wv._ensure_properties()
 
-        assert mock_warning.call_count == 6
+        assert len([r for r in cm.records if r.levelname == 'WARNING']) == 6
 
     @patch("dify_vdb_weaviate.weaviate_vector.weaviate")
     def test_search_by_vector_returns_doc_type_in_metadata(self, mock_weaviate_module):
