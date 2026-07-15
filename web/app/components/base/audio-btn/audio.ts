@@ -2,7 +2,7 @@ import { toast } from '@langgenius/dify-ui/toast'
 import { AppSourceType, textToAudioStream } from '@/service/share'
 
 declare global {
-  // oxlint-disable-next-line typescript/consistent-type-definitions
+  // eslint-disable-next-line ts/consistent-type-definitions
   interface Window {
     ManagedMediaSource: any
   }
@@ -147,6 +147,7 @@ export default class AudioPlayer {
       if (audioResponse.status !== 200) {
         this.isLoadData = false
         if (this.callback) this.callback('error')
+        return
       }
       const reader = audioResponse.body.getReader()
       while (true) {
