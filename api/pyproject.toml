@@ -5,7 +5,7 @@ requires-python = ">=3.11,<3.13"
 
 dependencies = [
     "aliyun-log-python-sdk~=0.9.37",
-    "arize-phoenix-otel~=0.15.0",
+    "arize-phoenix-otel~=0.16.1",
     "azure-identity==1.25.3",
     "beautifulsoup4==4.14.3",
     "boto3==1.42.68",
@@ -33,14 +33,14 @@ dependencies = [
     "jieba==0.42.1",
     "json-repair>=0.55.1",
     "jsonschema>=4.25.1",
-    "langfuse~=2.51.3",
-    "langsmith~=0.7.16",
+    "langfuse~=4.14.0",
+    "langsmith~=0.10.5",
     "markdown~=3.10.2",
-    "mlflow-skinny>=3.0.0",
+    "mlflow-skinny>=3.14.0",
     "numpy~=1.26.4",
     "openpyxl~=3.1.5",
-    "opik~=1.10.37",
-    "litellm==1.82.2",                                  # Pinned to avoid madoka dependency issue
+    "opik~=2.1.29",
+    "litellm==1.92.0",                                  # Pinned to avoid madoka dependency issue
     "opentelemetry-api==1.28.0",
     "opentelemetry-distro==0.49b0",
     "opentelemetry-exporter-otlp==1.28.0",
@@ -76,8 +76,8 @@ dependencies = [
     "sentry-sdk[flask]~=2.54.0",
     "sqlalchemy~=2.0.29",
     "starlette==0.52.1",
-    "tiktoken~=0.12.0",
-    "transformers~=5.3.0",
+    "tiktoken~=0.13.0",
+    "transformers~=5.13.1",
     "unstructured[docx,epub,md,ppt,pptx]~=0.21.5",
     "yarl~=1.23.0",
     "webvtt-py~=0.5.1",
@@ -89,7 +89,7 @@ dependencies = [
     "croniter>=6.0.0",
     "weaviate-client==4.17.0",
     "apscheduler>=3.11.0",
-    "weave>=0.52.16",
+    "weave>=0.53.1",
     "fastopenapi[flask]>=0.7.0",
 ]
 # Before adding new dependency, consider place it in
