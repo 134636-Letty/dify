@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import Engine, func, select
+from sqlalchemy.orm import Session
 
 from core.app.app_config.entities import (
     AdvancedChatMessageEntity,
@@ -25,7 +27,7 @@ from graphon.model_runtime.entities.message_entities import (
 )
 from graphon.model_runtime.entities.model_entities import ModelPropertyKey
 from graphon.model_runtime.errors.invoke import InvokeBadRequestError
-from models.model import AppMode
+from models.model import AppMode, MessageFile
 
 
 class _DummyParameterRule:
@@ -374,7 +376,13 @@ class TestAppRunner:
 
         assert stream.closed is True
 
-    def test_handle_multimodal_image_content_fallback_return_branch(self, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize("sqlite_session", [(MessageFile,)], indirect=True)
+    def test_handle_multimodal_image_content_fallback_return_branch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sqlite_engine: Engine,
+        sqlite_session: Session,
+    ):
         runner = AppRunner()
 
         class _ToggleBool:
@@ -393,9 +401,8 @@ class TestAppRunner:
             mime_type="image/png",
         )
 
-        db_session = SimpleNamespace(add=MagicMock(), commit=MagicMock(), refresh=MagicMock())
         monkeypatch.setattr("core.app.apps.base_app_runner.ToolFileManager", lambda: MagicMock())
-        monkeypatch.setattr("core.app.apps.base_app_runner.db", SimpleNamespace(session=db_session))
+        monkeypatch.setattr("core.app.apps.base_app_runner.db", SimpleNamespace(engine=sqlite_engine))
 
         queue_manager = SimpleNamespace(invoke_from=InvokeFrom.SERVICE_API, publish=MagicMock())
 
@@ -407,7 +414,8 @@ class TestAppRunner:
             queue_manager=queue_manager,
         )
 
-        db_session.add.assert_not_called()
+        message_file_count = sqlite_session.scalar(select(func.count()).select_from(MessageFile))
+        assert message_file_count == 0
         queue_manager.publish.assert_not_called()
 
     def test_check_hosting_moderation_direct_output_called(self, monkeypatch: pytest.MonkeyPatch):
