@@ -6567,9 +6567,6 @@
   "web/context/hooks/use-trigger-events-limit-modal.ts": {
     "eslint-react/set-state-in-effect": {
       "count": 3
-    },
-    "no-restricted-globals": {
-      "count": 2
     }
   },
   "web/context/web-app-context.tsx": {
