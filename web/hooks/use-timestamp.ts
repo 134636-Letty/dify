@@ -25,7 +25,7 @@ const useTimestamp = ({ timezone: timezoneOverride }: UseTimestampOptions = {}) 
   const locale = useLocale()
   const { data: accountTimezone } = useQuery({
     ...userProfileQueryOptions(),
-    select: data => data.profile.timezone ?? undefined,
+    select: (data) => data.profile.timezone ?? undefined,
     enabled: timezoneOverride === undefined,
   })
   const resolvedTimezone = timezoneOverride ?? accountTimezone ?? getBrowserTimezone()

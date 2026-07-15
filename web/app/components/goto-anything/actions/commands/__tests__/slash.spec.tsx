@@ -87,12 +87,18 @@ describe('slashAction', () => {
   })
 
   it('should delegate search to the slash command registry with the active language', async () => {
-    mockSearch.mockResolvedValue([{ id: 'theme', title: '/theme', type: 'command', data: { command: 'theme' } }])
+    mockSearch.mockResolvedValue([
+      { id: 'theme', title: '/theme', type: 'command', data: { command: 'theme' } },
+    ])
 
+    expect(slashAction.source).toBe('local')
+    if (slashAction.source !== 'local') throw new Error('Expected a local slash action')
     const results = await slashAction.search('/theme dark', 'dark')
 
     expect(mockSearch).toHaveBeenCalledWith('/theme dark', 'ja')
-    expect(results).toEqual([{ id: 'theme', title: '/theme', type: 'command', data: { command: 'theme' } }])
+    expect(results).toEqual([
+      { id: 'theme', title: '/theme', type: 'command', data: { command: 'theme' } },
+    ])
   })
 })
 
@@ -106,7 +112,7 @@ describe('SlashCommandProvider', () => {
   it('should not register the /create and /refine preview commands when the feature flag is off', () => {
     const { unmount } = render(<SlashCommandProvider />)
 
-    expect(mockRegister.mock.calls.map(call => call[0].name)).toEqual([
+    expect(mockRegister.mock.calls.map((call) => call[0].name)).toEqual([
       'theme',
       'language',
       'forum',
@@ -115,14 +121,18 @@ describe('SlashCommandProvider', () => {
       'account',
       'go',
     ])
-    expect(mockRegister).toHaveBeenCalledWith(expect.objectContaining({ name: 'theme' }), { setTheme: mockSetTheme })
-    expect(mockRegister).toHaveBeenCalledWith(expect.objectContaining({ name: 'language' }), { setLocale: mockSetLocale })
+    expect(mockRegister).toHaveBeenCalledWith(expect.objectContaining({ name: 'theme' }), {
+      setTheme: mockSetTheme,
+    })
+    expect(mockRegister).toHaveBeenCalledWith(expect.objectContaining({ name: 'language' }), {
+      setLocale: mockSetLocale,
+    })
 
     unmount()
 
     // Unregister is always called for the preview commands (a no-op when they
     // were never registered) so toggling the flag off mid-session stays clean.
-    expect(mockUnregister.mock.calls.map(call => call[0])).toEqual([
+    expect(mockUnregister.mock.calls.map((call) => call[0])).toEqual([
       'theme',
       'language',
       'forum',
@@ -140,7 +150,7 @@ describe('SlashCommandProvider', () => {
 
     const { unmount } = render(<SlashCommandProvider />)
 
-    expect(mockRegister.mock.calls.map(call => call[0].name)).toEqual([
+    expect(mockRegister.mock.calls.map((call) => call[0].name)).toEqual([
       'theme',
       'language',
       'forum',
@@ -154,7 +164,7 @@ describe('SlashCommandProvider', () => {
 
     unmount()
 
-    expect(mockUnregister.mock.calls.map(call => call[0])).toEqual([
+    expect(mockUnregister.mock.calls.map((call) => call[0])).toEqual([
       'theme',
       'language',
       'forum',

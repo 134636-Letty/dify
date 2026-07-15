@@ -16,10 +16,12 @@ let mockWorkspaceData: {
 }
 let mockWorkspaceIsPending = false
 let mockTrialModels: string[] | undefined = ['langgenius/openai/openai']
-let mockPlugins = [{
-  plugin_id: 'langgenius/openai',
-  latest_package_identifier: 'openai@1.0.0',
-}]
+let mockPlugins = [
+  {
+    plugin_id: 'langgenius/openai',
+    latest_package_identifier: 'openai@1.0.0',
+  },
+]
 
 vi.mock('@/app/components/base/icons/src/public/llm', () => {
   const Icon = ({ label }: { label: string }) => <span>{label}</span>
@@ -52,9 +54,10 @@ vi.mock('../use-trial-credits', () => ({
   },
 }))
 
-const renderQuotaPanel = (ui: ReactElement) => renderWithSystemFeatures(ui, {
-  trialModels: mockTrialModels ?? [],
-})
+const renderQuotaPanel = (ui: ReactElement) =>
+  renderWithSystemFeatures(ui, {
+    trialModels: mockTrialModels ?? [],
+  })
 
 vi.mock('../../hooks', () => ({
   useMarketplaceAllPlugins: () => ({
@@ -62,13 +65,16 @@ vi.mock('../../hooks', () => ({
   }),
 }))
 
-vi.mock('@/app/components/plugins/install-plugin/hooks/use-workspace-plugin-install-permission', () => ({
-  default: () => ({
-    canInstallPlugin: true,
-    canUpdatePlugin: true,
-    currentDifyVersion: '1.0.0',
+vi.mock(
+  '@/app/components/plugins/install-plugin/hooks/use-workspace-plugin-install-permission',
+  () => ({
+    default: () => ({
+      canInstallPlugin: true,
+      canUpdatePlugin: true,
+      currentDifyVersion: '1.0.0',
+    }),
   }),
-}))
+)
 
 vi.mock('@/hooks/use-timestamp', () => ({
   default: () => ({
@@ -81,7 +87,9 @@ vi.mock('@/app/components/plugins/install-plugin/install-from-marketplace', () =
   default: ({ onClose }: { onClose: () => void }) => (
     <div>
       <span>install modal</span>
-      <button type="button" onClick={onClose}>close install</button>
+      <button type="button" onClick={onClose}>
+        close install
+      </button>
     </div>
   ),
 }))
@@ -202,13 +210,16 @@ describe('QuotaPanel', () => {
 
   it('should show the supported-model tooltip for installed non-custom providers', () => {
     renderQuotaPanel(
-      <QuotaPanel providers={[
-        {
-          provider: 'langgenius/openai/openai',
-          preferred_provider_type: 'system',
-          custom_configuration: { available_credentials: [] },
-        },
-      ] as unknown as ModelProvider[]}
+      <QuotaPanel
+        providers={
+          [
+            {
+              provider: 'langgenius/openai/openai',
+              preferred_provider_type: 'system',
+              custom_configuration: { available_credentials: [] },
+            },
+          ] as unknown as ModelProvider[]
+        }
       />,
     )
 
