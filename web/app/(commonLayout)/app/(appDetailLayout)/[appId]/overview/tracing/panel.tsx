@@ -46,6 +46,7 @@ import {
 } from '@/service/apps'
 import { getAppACLCapabilities } from '@/utils/permission'
 import ConfigButton from './config-button'
+import { resolveTracingProvider } from './provider-resolution'
 import TracingIcon from './tracing-icon'
 import { TracingProvider } from './type'
 
@@ -86,12 +87,6 @@ const Panel: FC = () => {
     }
   }
 
-  const handleTracingEnabledChange = (enabled: boolean) => {
-    handleTracingStatusChange({
-      tracing_provider: tracingStatus?.tracing_provider || null,
-      enabled,
-    })
-  }
   const handleChooseProvider = (provider: TracingProvider) => {
     handleTracingStatusChange({
       tracing_provider: provider,
@@ -136,6 +131,26 @@ const Panel: FC = () => {
     databricksConfig ||
     tencentConfig
   )
+
+  const handleTracingEnabledChange = (enabled: boolean) => {
+    const tracingProvider = resolveTracingProvider(tracingStatus, {
+      langFuseConfig,
+      langSmithConfig,
+      opikConfig,
+      weaveConfig,
+      arizeConfig,
+      phoenixConfig,
+      aliyunConfig,
+      mlflowConfig,
+      databricksConfig,
+      tencentConfig,
+    })
+
+    handleTracingStatusChange({
+      tracing_provider: tracingProvider,
+      enabled,
+    })
+  }
 
   const fetchTracingConfig = async () => {
     const getArizeConfig = async () => {
