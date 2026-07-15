@@ -20,7 +20,7 @@ from models import Account
 from models.account import TenantAccountRole
 
 if not hasattr(builtins, "MethodView"):
-    builtins.MethodView = MethodView  # type: ignore[attr-defined]
+    vars(builtins)["MethodView"] = MethodView
 
 
 _CONTROLLER_MODULE: ModuleType | None = None
